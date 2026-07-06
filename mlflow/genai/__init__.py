@@ -1,5 +1,6 @@
 from mlflow.genai import (
     datasets,
+    improve,
     judges,
     scorers,
 )
@@ -48,6 +49,7 @@ from mlflow.genai.simulators import ConversationSimulator
 
 __all__ = [
     "datasets",
+    "improve",
     "test_agent",
     "evaluate",
     "to_predict_fn",

@@ -38,10 +38,19 @@ MLFLOW_RUN_SOURCE_TYPE = "mlflow.runSourceType"
 MLFLOW_RUN_TYPE = "mlflow.runType"
 MLFLOW_RUN_TYPE_GENAI_EVALUATE = "genai_evaluate"
 MLFLOW_RUN_TYPE_ISSUE_DETECTION = "issue_detection"
+MLFLOW_RUN_TYPE_IMPROVE_ANALYSIS = "improve_analysis"
 MLFLOW_RUN_TYPE_TEST = "test"
 
 # The ID of the job that is running issue detection
 MLFLOW_ISSUE_DETECTION_JOB_ID = "mlflow.issueDetection.jobId"
+
+# The ID of the job that is running improve analysis
+MLFLOW_IMPROVE_ANALYSIS_JOB_ID = "mlflow.improveAnalysis.jobId"
+
+# Improve feature: GitHub repo connection tags (set on experiments)
+MLFLOW_IMPROVE_GITHUB_REPO = "mlflow.improve.github_repo"
+MLFLOW_IMPROVE_GITHUB_BRANCH = "mlflow.improve.github_branch"
+MLFLOW_IMPROVE_CODE_AGENT = "mlflow.improve.code_agent"
 
 # The ID of the job that is running the UI-triggered mlflow.genai.evaluate flow
 MLFLOW_GENAI_EVALUATE_JOB_ID = "mlflow.genaiEvaluate.jobId"

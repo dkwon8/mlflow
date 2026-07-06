@@ -10,6 +10,7 @@ import {
   ModelsIcon,
   PlayIcon,
   PlusMinusSquareIcon,
+  SparkleIcon,
   SpeechBubbleIcon,
   TextBoxIcon,
   UserGroupIcon,
@@ -31,7 +32,7 @@ export type ExperimentPageSideNavConfig = {
   [section in ExperimentPageSideNavSectionKey]?: ExperimentPageSideNavItem[];
 };
 
-export type ExperimentPageSideNavSectionKey = 'top-level' | 'observability' | 'evaluation' | 'prompts-versions';
+export type ExperimentPageSideNavSectionKey = 'top-level' | 'observability' | 'evaluation' | 'prompts-versions' | 'improve';
 
 const ExperimentPageSideNavGenAIConfig = {
   observability: [
@@ -191,6 +192,13 @@ export const getExperimentPageSideNavSectionLabel = (
           description="Label for the versions section in the MLflow experiment navbar"
         />
       );
+    case 'improve':
+      return (
+        <FormattedMessage
+          defaultMessage="Improve"
+          description="Label for the improve section in the MLflow experiment navbar"
+        />
+      );
     default:
       // no label for top-level section
       return undefined;
@@ -260,6 +268,19 @@ export const useExperimentPageSideNavConfig = ({
             ...ExperimentPageSideNavGenAIConfig.evaluation,
           ]
         : ExperimentPageSideNavGenAIConfig.evaluation,
+      improve: [
+        {
+          label: (
+            <FormattedMessage
+              defaultMessage="Improve"
+              description="Label for the improve tab in the MLflow experiment navbar"
+            />
+          ),
+          icon: <SparkleIcon />,
+          tabName: ExperimentPageTabName.Improve,
+          componentId: 'mlflow.experiment-side-nav.genai.improve',
+        },
+      ],
     };
 
     return baseConfig;

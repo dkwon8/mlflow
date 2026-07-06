@@ -362,9 +362,11 @@ from mlflow.utils.file_utils import local_file_uri_to_path
 from mlflow.utils.mime_type_utils import _guess_mime_type
 from mlflow.utils.mlflow_tags import (
     MLFLOW_GENAI_EVALUATE_JOB_ID,
+    MLFLOW_IMPROVE_ANALYSIS_JOB_ID,
     MLFLOW_ISSUE_DETECTION_JOB_ID,
     MLFLOW_RUN_TYPE,
     MLFLOW_RUN_TYPE_GENAI_EVALUATE,
+    MLFLOW_RUN_TYPE_IMPROVE_ANALYSIS,
     MLFLOW_RUN_TYPE_ISSUE_DETECTION,
     MLFLOW_TRACE_ARCHIVAL_FAILURE,
     MLFLOW_TRACE_ARCHIVE_LOCATION,
@@ -5001,6 +5003,102 @@ def _invoke_issue_detection_handler():
 
 @catch_mlflow_exception
 @_disable_if_artifacts_only
+def _invoke_improve_analysis_handler():
+    """
+    Invoke improve analysis on an experiment's traces asynchronously.
+
+    Analyzes recent traces for performance patterns (context bloat, tool
+    redundancy, score degradation, etc.) and creates Issue entities for
+    each finding. Does not require an LLM API key — analysis is rule-based.
+    """
+    from mlflow.genai.improve.job import invoke_improve_analysis_job
+    from mlflow.server.jobs import submit_job
+
+    _validate_content_type(request, ["application/json"])
+
+    request_json = _get_validated_flask_request_json(
+        schema={
+            "experiment_id": [_assert_required, _assert_string],
+            "trace_count": [_assert_intlike],
+        }
+    )
+
+    experiment_id = request_json.get("experiment_id")
+    trace_count = request_json.get("trace_count", 20)
+
+    tags = {
+        MLFLOW_RUN_TYPE: MLFLOW_RUN_TYPE_IMPROVE_ANALYSIS,
+        "trace_count": str(trace_count),
+    }
+    run = mlflow.start_run(
+        experiment_id=experiment_id,
+        tags=tags,
+    )
+    run_id = run.info.run_id
+
+    job = submit_job(
+        function=invoke_improve_analysis_job,
+        params={
+            "experiment_id": experiment_id,
+            "trace_count": trace_count,
+            "run_id": run_id,
+        },
+    )
+    mlflow.set_tag(MLFLOW_IMPROVE_ANALYSIS_JOB_ID, job.job_id)
+    mlflow.end_run(RunStatus.to_string(RunStatus.RUNNING))
+
+    return jsonify({"job_id": job.job_id, "run_id": run_id})
+
+
+@catch_mlflow_exception
+@_disable_if_artifacts_only
+def _invoke_improve_fix_handler():
+    """
+    Invoke the code agent to create a fix PR for a detected issue.
+
+    Reads the experiment's GitHub repo connection tags and uses the
+    configured code agent to clone the repo and create a PR.
+    """
+    from mlflow.genai.improve.job import invoke_improve_fix_job
+    from mlflow.server.jobs import submit_job
+
+    _validate_content_type(request, ["application/json"])
+
+    request_json = _get_validated_flask_request_json(
+        schema={
+            "issue_id": [_assert_required, _assert_string],
+            "experiment_id": [_assert_required, _assert_string],
+        }
+    )
+
+    issue_id = request_json.get("issue_id")
+    experiment_id = request_json.get("experiment_id")
+
+    tags = {
+        MLFLOW_RUN_TYPE: MLFLOW_RUN_TYPE_IMPROVE_ANALYSIS,
+        "issue_id": issue_id,
+    }
+    run = mlflow.start_run(
+        experiment_id=experiment_id,
+        tags=tags,
+    )
+    run_id = run.info.run_id
+
+    job = submit_job(
+        function=invoke_improve_fix_job,
+        params={
+            "issue_id": issue_id,
+            "experiment_id": experiment_id,
+            "run_id": run_id,
+        },
+    )
+    mlflow.end_run(RunStatus.to_string(RunStatus.RUNNING))
+
+    return jsonify({"job_id": job.job_id, "run_id": run_id})
+
+
+@catch_mlflow_exception
+@_disable_if_artifacts_only
 def _invoke_genai_evaluate_handler():
     """
     Run mlflow.genai.evaluate(...) against the chosen traces + scorers as an
@@ -6803,6 +6901,7 @@ def get_endpoints(get_handler=get_handler):
         + get_gateway_endpoints()
         + get_demo_endpoints()
         + get_issues_detection_endpoints()
+        + get_improve_endpoints()
         + get_genai_evaluate_endpoints()
         + get_job_endpoints()
     )
@@ -6844,6 +6943,21 @@ def get_issues_detection_endpoints():
         (
             _get_ajax_path("/mlflow/issues/invoke", version=3),
             _invoke_issue_detection_handler,
+            ["POST"],
+        ),
+    ]
+
+
+def get_improve_endpoints():
+    return [
+        (
+            _get_ajax_path("/mlflow/improve/invoke", version=3),
+            _invoke_improve_analysis_handler,
+            ["POST"],
+        ),
+        (
+            _get_ajax_path("/mlflow/improve/fix", version=3),
+            _invoke_improve_fix_handler,
             ["POST"],
         ),
     ]

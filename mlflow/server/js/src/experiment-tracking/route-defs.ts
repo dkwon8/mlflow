@@ -221,6 +221,19 @@ const getExperimentPageRouteDefs = () => {
           } satisfies RouteHandle,
         },
         {
+          path: RoutePaths.experimentPageTabImprove,
+          pageId: PageId.experimentPageTabImprove,
+          element: createLazyRouteElement(() => import('./pages/experiment-improve/ExperimentImprovePage')),
+          handle: {
+            getPageTitle: (params) => `Improve - Experiment ${params['experimentId']}`,
+            getAssistantPrompts: () => [
+              'What issues has the analyzer found?',
+              'How can I improve my agent performance?',
+              'Show me the improvement suggestions.',
+            ],
+          } satisfies RouteHandle,
+        },
+        {
           path: RoutePaths.experimentPageTabPrompts,
           pageId: PageId.experimentPageTabPrompts,
           element: createLazyRouteElement(() => {

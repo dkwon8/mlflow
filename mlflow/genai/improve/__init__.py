@@ -16,10 +16,10 @@ Usage:
 
     # See what was found
     for suggestion in result["suggestions"]:
-        print(f"[{suggestion.severity}] {suggestion.title}")
-        print(f"  Action: {suggestion.action}")
+        print(f"[{suggestion['severity']}] {suggestion['title']}")
+        print(f"  Action: {suggestion['action']}")
 
-Works with any agent deployed on MLflow — not specific to any one agent.
+Works with any agent deployed on MLflow — no custom instrumentation required.
 """
 
 from __future__ import annotations
@@ -35,9 +35,9 @@ def analyze(
 ) -> dict:
     """Analyze recent traces and generate improvement suggestions.
 
-    Reads the last N traces from an MLflow experiment, runs detection
-    patterns (context bloat, tool redundancy, score degradation, etc.),
-    and returns actionable suggestions.
+    Reads the last N traces from an MLflow experiment, parses raw span
+    data to extract tool calls, errors, and timing, runs detection
+    patterns, and returns actionable suggestions.
 
     Args:
         experiment_name: Name of the MLflow experiment to analyze.
@@ -77,41 +77,21 @@ def analyze(
 
     traces_data = []
     for _, row in raw_traces.iterrows():
-        trace_id = row.get("trace_id", "")
-
-        tags = row.get("tags", {})
-        if not isinstance(tags, dict):
-            tags = {}
-
-        assessments = []
-        raw_assessments = row.get("assessments", [])
-        if isinstance(raw_assessments, list):
-            for a in raw_assessments:
-                if isinstance(a, dict):
-                    assessments.append(a)
-                else:
-                    assessments.append({
-                        "name": getattr(a, "assessment_name", getattr(a, "name", "")),
-                        "value": getattr(a, "string_value", getattr(a, "value", "")),
-                    })
-
         traces_data.append({
-            "trace_id": trace_id,
-            "tags": tags,
-            "assessments": assessments,
+            "trace_id": row.get("trace_id", ""),
+            "spans": row.get("spans", []),
             "execution_duration": int(row.get("execution_duration", 0) or 0),
+            "assessments": row.get("assessments", []),
         })
 
     findings = analyze_traces(traces_data)
     suggestions = generate_suggestions(findings)
 
-    model_tags = [t["tags"].get("agent.model", "") for t in traces_data if t["tags"].get("agent.model")]
-    current_model = model_tags[0] if model_tags else "unknown"
+    from .analyzer import _parse_trace
+    parsed = [_parse_trace(t) for t in traces_data]
 
-    avg_tool_calls = 0
-    tool_counts = [int(t["tags"].get("agent.tool_call_count", 0)) for t in traces_data if t["tags"].get("agent.tool_call_count")]
-    if tool_counts:
-        avg_tool_calls = sum(tool_counts) / len(tool_counts)
+    total_tool_calls = sum(p["tool_call_count"] for p in parsed)
+    avg_tool_calls = total_tool_calls / len(parsed) if parsed else 0
 
     return {
         "findings": [
@@ -143,7 +123,6 @@ def analyze(
             "traces_analyzed": len(traces_data),
             "findings_count": len(findings),
             "suggestions_count": len(suggestions),
-            "current_model": current_model,
             "avg_tool_calls": round(avg_tool_calls, 1),
             "high_severity": sum(1 for f in findings if f.severity == "high"),
             "medium_severity": sum(1 for f in findings if f.severity == "medium"),

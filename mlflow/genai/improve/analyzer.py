@@ -1,8 +1,9 @@
 """
 Trace analyzer for the MLflow improve system.
 
-Reads traces, tags, and assessments from MLflow and detects patterns
+Reads raw trace spans and assessments from MLflow to detect patterns
 that indicate quality degradation, inefficiency, or scaling issues.
+Works universally with any MLflow-traced agent — no custom tags required.
 
 Each detection function returns a list of findings that the suggestion
 engine uses to generate actionable fixes.
@@ -10,6 +11,8 @@ engine uses to generate actionable fixes.
 
 from __future__ import annotations
 
+import json
+from collections import Counter
 from dataclasses import dataclass, field
 
 
@@ -22,13 +25,92 @@ class Finding:
     evidence: dict = field(default_factory=dict)
 
 
+def _extract_span_info(span: dict) -> dict:
+    """Extract useful fields from a raw span dict."""
+    attrs = span.get("attributes", {})
+    if isinstance(attrs, str):
+        try:
+            import ast
+            attrs = ast.literal_eval(attrs)
+        except (ValueError, SyntaxError):
+            attrs = {}
+
+    status = span.get("status", {})
+    if isinstance(status, str):
+        try:
+            import ast
+            status = ast.literal_eval(status)
+        except (ValueError, SyntaxError):
+            status = {}
+
+    span_type = attrs.get("mlflow.spanType", "").strip('"')
+    status_code = status.get("code", "") if isinstance(status, dict) else ""
+
+    return {
+        "name": span.get("name", ""),
+        "span_type": span_type,
+        "is_error": status_code == "STATUS_CODE_ERROR",
+        "start_ns": int(span.get("start_time_unix_nano", 0)),
+        "end_ns": int(span.get("end_time_unix_nano", 0)),
+    }
+
+
+def _parse_trace(trace_row: dict) -> dict:
+    """Parse a raw trace row into a structured dict for analysis.
+
+    Extracts tool calls, errors, execution time, trace size, and
+    assessments directly from span data — no custom tags needed.
+    """
+    spans = trace_row.get("spans", [])
+    if not spans:
+        spans = []
+
+    tool_names = []
+    error_count = 0
+    for span in spans:
+        info = _extract_span_info(span)
+        if info["span_type"] == "TOOL":
+            tool_names.append(info["name"])
+        if info["is_error"]:
+            error_count += 1
+
+    tool_counts = Counter(tool_names)
+    unique_tools = set(tool_names)
+    duplicates = {name: count for name, count in tool_counts.items() if count > 1}
+
+    trace_size = len(json.dumps(spans, default=str).encode())
+
+    execution_ms = int(trace_row.get("execution_duration", 0) or 0)
+
+    assessments = []
+    for a in trace_row.get("assessments", []):
+        if isinstance(a, dict):
+            name = a.get("assessment_name", a.get("name", ""))
+            feedback = a.get("feedback", {})
+            value = feedback.get("value") if isinstance(feedback, dict) else None
+            if value is None:
+                value = a.get("value", a.get("string_value"))
+            assessments.append({"name": name, "value": value})
+
+    return {
+        "trace_id": trace_row.get("trace_id", ""),
+        "tool_names": tool_names,
+        "unique_tools": unique_tools,
+        "duplicate_tools": duplicates,
+        "tool_call_count": len(tool_names),
+        "error_count": error_count,
+        "execution_ms": execution_ms,
+        "trace_size_bytes": trace_size,
+        "assessments": assessments,
+    }
+
+
 def analyze_traces(traces_data: list[dict]) -> list[Finding]:
     """Run all detection patterns against a set of traces.
 
     Args:
-        traces_data: List of trace dicts, each with keys:
-            - trace_id, tags (dict), assessments (list),
-              execution_duration (int ms), trace_size (int bytes)
+        traces_data: List of raw trace dicts from mlflow.search_traces().
+            Each dict should have keys: spans, execution_duration, assessments.
 
     Returns:
         List of Finding objects describing detected issues.
@@ -36,27 +118,21 @@ def analyze_traces(traces_data: list[dict]) -> list[Finding]:
     if not traces_data:
         return []
 
+    parsed = [_parse_trace(t) for t in traces_data]
+
     findings = []
-    findings.extend(_detect_context_bloat(traces_data))
-    findings.extend(_detect_tool_redundancy(traces_data))
-    findings.extend(_detect_score_degradation(traces_data))
-    findings.extend(_detect_slowdown(traces_data))
-    findings.extend(_detect_error_spike(traces_data))
-    findings.extend(_detect_incomplete_pipeline(traces_data))
+    findings.extend(_detect_context_bloat(parsed))
+    findings.extend(_detect_tool_redundancy(parsed))
+    findings.extend(_detect_score_degradation(parsed))
+    findings.extend(_detect_slowdown(parsed))
+    findings.extend(_detect_error_spike(parsed))
+    findings.extend(_detect_incomplete_pipeline(parsed))
     return findings
 
 
 def _detect_context_bloat(traces: list[dict]) -> list[Finding]:
-    """Detect if trace sizes are growing, indicating context window pressure.
-
-    Maps to mentor's example: 'if it has 1000 resumes, context bloat happens,
-    switch from 250K model to 1M model.'
-    """
-    sizes = []
-    for t in traces:
-        size = int(t.get("tags", {}).get("agent.trace_size_bytes", 0))
-        if size > 0:
-            sizes.append(size)
+    """Detect if trace sizes are growing, indicating context window pressure."""
+    sizes = [t["trace_size_bytes"] for t in traces if t["trace_size_bytes"] > 0]
 
     if len(sizes) < 2:
         return []
@@ -66,7 +142,6 @@ def _detect_context_bloat(traces: list[dict]) -> list[Finding]:
     max_size = max(sizes)
     recent_avg = sum(sizes[:3]) / min(3, len(sizes))
 
-    # Large traces (over 1MB suggest heavy context usage)
     if max_size > 1_000_000:
         findings.append(Finding(
             pattern="context_bloat",
@@ -80,7 +155,6 @@ def _detect_context_bloat(traces: list[dict]) -> list[Finding]:
             },
         ))
 
-    # Growing trend (recent traces are bigger than older ones)
     if len(sizes) >= 5:
         older_avg = sum(sizes[-3:]) / 3
         if recent_avg > older_avg * 1.5 and recent_avg > 500_000:
@@ -99,20 +173,15 @@ def _detect_context_bloat(traces: list[dict]) -> list[Finding]:
 
 
 def _detect_tool_redundancy(traces: list[dict]) -> list[Finding]:
-    """Detect if the agent is making redundant tool calls.
-
-    Looks at agent.duplicate_tools tag across traces. If the same tools
-    are duplicated repeatedly, it's a pattern worth fixing.
-    """
+    """Detect if the agent is making redundant tool calls by analyzing span data."""
     duplicate_counts: dict[str, int] = {}
     traces_with_duplicates = 0
 
     for t in traces:
-        dupes = t.get("tags", {}).get("agent.duplicate_tools", "none")
-        if dupes != "none" and dupes:
+        if t["duplicate_tools"]:
             traces_with_duplicates += 1
-            for tool in dupes.split(", "):
-                duplicate_counts[tool] = duplicate_counts.get(tool, 0) + 1
+            for tool_name in t["duplicate_tools"]:
+                duplicate_counts[tool_name] = duplicate_counts.get(tool_name, 0) + 1
 
     if not duplicate_counts:
         return []
@@ -137,27 +206,19 @@ def _detect_tool_redundancy(traces: list[dict]) -> list[Finding]:
 
 
 def _detect_score_degradation(traces: list[dict]) -> list[Finding]:
-    """Detect if built-in assessment scores are trending downward.
-
-    Tracks completeness, tool_call_correctness, tool_call_efficiency,
-    and relevance_to_query over time.
-    """
-    score_map = {
-        "completeness": [],
-        "tool_call_correctness": [],
-        "tool_call_efficiency": [],
-        "relevance_to_query": [],
-    }
+    """Detect if assessment scores are trending downward."""
+    score_map: dict[str, list[int]] = {}
 
     for t in traces:
-        for a in t.get("assessments", []):
+        for a in t["assessments"]:
             name = a.get("name", "")
-            if name in score_map:
-                val = a.get("value")
-                if val in ("yes", "true", "True", True):
-                    score_map[name].append(1)
-                elif val in ("no", "false", "False", False):
-                    score_map[name].append(0)
+            if not name:
+                continue
+            val = a.get("value")
+            if val in ("yes", "true", "True", True):
+                score_map.setdefault(name, []).append(1)
+            elif val in ("no", "false", "False", False):
+                score_map.setdefault(name, []).append(0)
 
     findings = []
     for name, scores in score_map.items():
@@ -199,11 +260,7 @@ def _detect_score_degradation(traces: list[dict]) -> list[Finding]:
 
 def _detect_slowdown(traces: list[dict]) -> list[Finding]:
     """Detect if execution time is increasing over time."""
-    times = []
-    for t in traces:
-        ms = int(t.get("tags", {}).get("agent.execution_time_ms", 0))
-        if ms > 0:
-            times.append(ms)
+    times = [t["execution_ms"] for t in traces if t["execution_ms"] > 0]
 
     if len(times) < 3:
         return []
@@ -242,11 +299,8 @@ def _detect_slowdown(traces: list[dict]) -> list[Finding]:
 
 
 def _detect_error_spike(traces: list[dict]) -> list[Finding]:
-    """Detect if tool errors are increasing."""
-    error_counts = []
-    for t in traces:
-        errors = int(t.get("tags", {}).get("agent.tool_errors", 0))
-        error_counts.append(errors)
+    """Detect if tool errors are increasing by counting error spans."""
+    error_counts = [t["error_count"] for t in traces]
 
     if not error_counts:
         return []
@@ -278,35 +332,35 @@ def _detect_error_spike(traces: list[dict]) -> list[Finding]:
 def _detect_incomplete_pipeline(traces: list[dict]) -> list[Finding]:
     """Detect if the agent is skipping pipeline steps.
 
-    A full pipeline should use: parse_all_resumes, filter_candidates,
-    score_all_candidates (or score_all_for_role), generate_report, sort_resumes.
+    Dynamically determines expected tools by finding tools that appear
+    in >80% of traces — these are the agent's "standard" steps. Traces
+    missing any standard tool are flagged as incomplete.
     """
-    expected_core = {"parse_all_resumes", "filter_candidates", "generate_report", "sort_resumes"}
-    expected_scoring = {"score_all_candidates", "score_all_for_role"}
+    tool_sets = [t["unique_tools"] for t in traces if t["unique_tools"]]
+
+    if len(tool_sets) < 3:
+        return []
+
+    tool_frequency: dict[str, int] = {}
+    for ts in tool_sets:
+        for tool in ts:
+            tool_frequency[tool] = tool_frequency.get(tool, 0) + 1
+
+    threshold = len(tool_sets) * 0.8
+    expected_tools = {tool for tool, count in tool_frequency.items() if count >= threshold}
+
+    if not expected_tools:
+        return []
 
     incomplete_count = 0
     missing_tools: dict[str, int] = {}
 
-    for t in traces:
-        tools_used = t.get("tags", {}).get("agent.tools_used", "")
-        if not tools_used or tools_used == "none":
-            continue
-
-        used_set = {tool.strip() for tool in tools_used.split(",")}
-
-        # Only check traces that look like pipeline runs (have parse)
-        if "parse_all_resumes" not in used_set:
-            continue
-
-        missing_core = expected_core - used_set
-        has_scoring = bool(used_set & expected_scoring)
-
-        if missing_core or not has_scoring:
+    for ts in tool_sets:
+        missing = expected_tools - ts
+        if missing:
             incomplete_count += 1
-            for tool in missing_core:
+            for tool in missing:
                 missing_tools[tool] = missing_tools.get(tool, 0) + 1
-            if not has_scoring:
-                missing_tools["scoring"] = missing_tools.get("scoring", 0) + 1
 
     if incomplete_count == 0:
         return []
@@ -314,9 +368,11 @@ def _detect_incomplete_pipeline(traces: list[dict]) -> list[Finding]:
     return [Finding(
         pattern="incomplete_pipeline",
         severity="medium",
-        description=f"Pipeline incomplete in {incomplete_count} traces. Missing steps: {', '.join(missing_tools.keys())}.",
+        description=f"Pipeline incomplete in {incomplete_count}/{len(tool_sets)} traces. Missing steps: {', '.join(missing_tools.keys())}.",
         evidence={
             "incomplete_count": incomplete_count,
+            "total_traces_with_tools": len(tool_sets),
+            "expected_tools": sorted(expected_tools),
             "missing_tools": missing_tools,
         },
     )]
