@@ -101,7 +101,7 @@ class ClaudeCodeAgent(CodeAgent):
 
     def _run_claude(self, cli_cmd: str, repo_dir: Path, prompt: str) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [cli_cmd, "--print", "--dangerously-skip-permissions", prompt],
+            [cli_cmd, "-p", prompt, "--dangerously-skip-permissions"],
             cwd=repo_dir,
             capture_output=True,
             text=True,
@@ -109,21 +109,30 @@ class ClaudeCodeAgent(CodeAgent):
         )
 
     def _create_pr(self, repo_dir: Path, branch_name: str, request: FixRequest) -> str | None:
+        # Check for committed changes on this branch vs origin
         diff = subprocess.run(
-            ["git", "diff", "HEAD"],
+            ["git", "log", "origin/" + request.branch + "..HEAD", "--oneline"],
             cwd=repo_dir,
             capture_output=True,
             text=True,
         )
-        if not diff.stdout.strip():
-            status = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
+        # Also check for uncommitted changes
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+        )
+        if not diff.stdout.strip() and not status.stdout.strip():
+            return None
+
+        # Stage and commit any uncommitted changes
+        if status.stdout.strip():
+            subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "commit", "-m", f"fix: {request.issue_name}"],
+                cwd=repo_dir, capture_output=True, text=True,
             )
-            if not status.stdout.strip():
-                return None
 
         subprocess.run(
             ["git", "push", "origin", branch_name],
