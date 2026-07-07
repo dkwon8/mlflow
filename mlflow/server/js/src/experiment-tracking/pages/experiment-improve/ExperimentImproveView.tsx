@@ -1,18 +1,8 @@
 import { useState, useCallback } from 'react';
-import {
-  Button,
-  Card,
-  Input,
-  SparkleIcon,
-  Tag,
-  Typography,
-  useDesignSystemTheme,
-} from '@databricks/design-system';
+import { Button, Card, Input, SparkleIcon, Tag, Typography, useDesignSystemTheme } from '@databricks/design-system';
 import type { TagColors } from '@databricks/design-system';
 import { FormattedMessage } from 'react-intl';
 import { getAjaxUrl } from '../../../common/utils/FetchUtils';
-
-const { Title, Text, Paragraph } = Typography;
 
 interface Suggestion {
   id: string;
@@ -31,26 +21,24 @@ interface Finding {
   description: string;
 }
 
-interface Summary {
-  status: string;
-  traces_analyzed?: number;
-  findings_count?: number;
-  suggestions_count?: number;
-  avg_tool_calls?: number;
-  high_severity?: number;
-  medium_severity?: number;
-}
-
 interface AnalysisResult {
   findings: Finding[];
   suggestions: Suggestion[];
-  summary: Summary;
+  summary: {
+    status: string;
+    traces_analyzed?: number;
+    findings_count?: number;
+    suggestions_count?: number;
+    avg_tool_calls?: number;
+    high_severity?: number;
+    medium_severity?: number;
+  };
 }
 
 const SEVERITY_COLORS: Record<string, TagColors> = {
-  high: 'red',
+  high: 'coral',
   medium: 'lemon',
-  low: 'turquoise',
+  low: 'charcoal',
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -60,11 +48,7 @@ const TYPE_LABELS: Record<string, string> = {
   investigate: 'Investigate',
 };
 
-interface ExperimentImproveViewProps {
-  experimentId: string;
-}
-
-export const ExperimentImproveView = ({ experimentId }: ExperimentImproveViewProps) => {
+export const ExperimentImproveView = ({ experimentId }: { experimentId: string }) => {
   const { theme } = useDesignSystemTheme();
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -82,19 +66,8 @@ export const ExperimentImproveView = ({ experimentId }: ExperimentImproveViewPro
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ experiment_id: experimentId, trace_count: 20 }),
       });
-      if (!response.ok) {
-        throw new Error(`Analysis failed: ${response.statusText}`);
-      }
-      const jobResult = await response.json();
-
-      // Poll for job completion, then fetch results directly
-      // For now, run analysis synchronously via the Python API
-      const directResponse = await fetch(getAjaxUrl('ajax-api/3.0/mlflow/improve/invoke'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ experiment_id: experimentId, trace_count: 20 }),
-      });
-      const result = await directResponse.json();
+      if (!response.ok) throw new Error(`Analysis failed: ${response.statusText}`);
+      const result = await response.json();
       setAnalysisResult(result);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Analysis failed');
@@ -112,13 +85,9 @@ export const ExperimentImproveView = ({ experimentId }: ExperimentImproveViewPro
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ issue_id: issueId, experiment_id: experimentId }),
         });
-        if (!response.ok) {
-          throw new Error(`Fix failed: ${response.statusText}`);
-        }
+        if (!response.ok) throw new Error(`Fix failed: ${response.statusText}`);
         const result = await response.json();
-        if (result.pr_url) {
-          window.open(result.pr_url, '_blank');
-        }
+        if (result.pr_url) window.open(result.pr_url, '_blank');
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Fix failed');
       } finally {
@@ -133,11 +102,7 @@ export const ExperimentImproveView = ({ experimentId }: ExperimentImproveViewPro
       await fetch(getAjaxUrl('ajax-api/2.0/mlflow/experiments/set-experiment-tag'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          experiment_id: experimentId,
-          key: 'mlflow.improve.github_repo',
-          value: githubRepo,
-        }),
+        body: JSON.stringify({ experiment_id: experimentId, key: 'mlflow.improve.github_repo', value: githubRepo }),
       });
       setRepoSaved(true);
     } catch (e) {
@@ -150,181 +115,132 @@ export const ExperimentImproveView = ({ experimentId }: ExperimentImproveViewPro
     (summary?.high_severity ?? 0) > 0 ? 'critical' : (summary?.medium_severity ?? 0) > 0 ? 'warning' : 'healthy';
 
   return (
-    <div style={{ padding: theme.spacing.lg, maxWidth: 900 }}>
+    <div css={{ padding: theme.spacing.lg, maxWidth: 900 }}>
       {/* Header */}
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: theme.spacing.lg,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
+      <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: theme.spacing.lg }}>
+        <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
           <SparkleIcon />
-          <Title level={3}>
+          <Typography.Title level={3} css={{ margin: 0 }}>
             <FormattedMessage defaultMessage="Improve" description="Title for the improve page" />
-          </Title>
+          </Typography.Title>
         </div>
-        <Button type="primary" loading={isAnalyzing} onClick={runAnalysis}>
+        <Button componentId="mlflow.improve.run-analysis" type="primary" loading={isAnalyzing} onClick={runAnalysis}>
           <FormattedMessage defaultMessage="Run Analysis" description="Button to run improve analysis" />
         </Button>
       </div>
 
-      {/* Error message */}
+      {/* Error */}
       {error && (
-        <Card style={{ marginBottom: theme.spacing.md, borderColor: theme.colors.red }}>
-          <Text style={{ color: theme.colors.red }}>{error}</Text>
+        <Card componentId="mlflow.improve.error-card" css={{ marginBottom: theme.spacing.md }}>
+          <Typography.Text color="error">{error}</Typography.Text>
         </Card>
       )}
 
       {/* GitHub Connection */}
-      <Card style={{ marginBottom: theme.spacing.lg }}>
-        <Title level={4} style={{ marginBottom: theme.spacing.sm }}>
+      <Card componentId="mlflow.improve.github-card" css={{ marginBottom: theme.spacing.lg }}>
+        <Typography.Title level={4} css={{ marginBottom: theme.spacing.sm }}>
           <FormattedMessage defaultMessage="GitHub Repository" description="GitHub connection section title" />
-        </Title>
-        <Text type="secondary" style={{ display: 'block', marginBottom: theme.spacing.sm }}>
+        </Typography.Title>
+        <Typography.Text color="secondary" css={{ display: 'block', marginBottom: theme.spacing.sm }}>
           <FormattedMessage
             defaultMessage="Connect a GitHub repository to enable automatic fix PRs."
             description="GitHub connection description"
           />
-        </Text>
-        <div style={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'center' }}>
+        </Typography.Text>
+        <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'center' }}>
           <Input
+            componentId="mlflow.improve.github-input"
             placeholder="owner/repo-name"
             value={githubRepo}
             onChange={(e) => {
               setGithubRepo(e.target.value);
               setRepoSaved(false);
             }}
-            style={{ flex: 1 }}
+            css={{ flex: 1 }}
           />
-          <Button onClick={saveGithubRepo} disabled={!githubRepo || repoSaved}>
-            {repoSaved ? (
-              <FormattedMessage defaultMessage="Saved" description="Repo saved confirmation" />
-            ) : (
-              <FormattedMessage defaultMessage="Connect" description="Connect repo button" />
-            )}
+          <Button componentId="mlflow.improve.connect-repo" onClick={saveGithubRepo} disabled={!githubRepo || repoSaved}>
+            {repoSaved ? 'Saved' : 'Connect'}
           </Button>
         </div>
       </Card>
 
-      {/* No analysis yet */}
+      {/* Empty state */}
       {!analysisResult && !isAnalyzing && (
-        <Card>
-          <div style={{ textAlign: 'center', padding: theme.spacing.lg }}>
-            <SparkleIcon style={{ fontSize: 32, marginBottom: theme.spacing.sm, color: theme.colors.grey500 }} />
-            <Paragraph type="secondary">
+        <Card componentId="mlflow.improve.empty-state">
+          <div css={{ textAlign: 'center', padding: theme.spacing.lg }}>
+            <SparkleIcon css={{ fontSize: 32, marginBottom: theme.spacing.sm, color: theme.colors.actionDisabledText }} />
+            <Typography.Text color="secondary" css={{ display: 'block' }}>
               <FormattedMessage
                 defaultMessage="Click 'Run Analysis' to analyze your recent traces for performance issues, quality degradation, and optimization opportunities."
-                description="Empty state message for improve page"
+                description="Empty state message"
               />
-            </Paragraph>
+            </Typography.Text>
           </div>
         </Card>
       )}
 
       {/* Health Summary */}
       {summary && (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(4, 1fr)',
-            gap: theme.spacing.sm,
-            marginBottom: theme.spacing.lg,
-          }}
-        >
-          <Card>
-            <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase' }}>
-              Status
-            </Text>
-            <Title
-              level={4}
-              style={{
-                color:
-                  healthStatus === 'critical'
-                    ? theme.colors.red
-                    : healthStatus === 'warning'
-                      ? theme.colors.yellow
-                      : theme.colors.green,
-                marginTop: 4,
-              }}
-            >
-              {healthStatus === 'critical' ? 'Needs attention' : healthStatus === 'warning' ? 'Some issues' : 'Healthy'}
-            </Title>
-          </Card>
-          <Card>
-            <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase' }}>
-              Traces Analyzed
-            </Text>
-            <Title level={4} style={{ marginTop: 4 }}>
-              {summary.traces_analyzed ?? 0}
-            </Title>
-          </Card>
-          <Card>
-            <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase' }}>
-              Findings
-            </Text>
-            <Title level={4} style={{ marginTop: 4 }}>
-              {summary.findings_count ?? 0}
-            </Title>
-          </Card>
-          <Card>
-            <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase' }}>
-              Avg Tool Calls
-            </Text>
-            <Title level={4} style={{ marginTop: 4 }}>
-              {summary.avg_tool_calls ?? '—'}
-            </Title>
-          </Card>
+        <div css={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: theme.spacing.sm, marginBottom: theme.spacing.lg }}>
+          {[
+            { label: 'Status', value: healthStatus === 'critical' ? 'Needs attention' : healthStatus === 'warning' ? 'Some issues' : 'Healthy' },
+            { label: 'Traces Analyzed', value: summary.traces_analyzed ?? 0 },
+            { label: 'Findings', value: summary.findings_count ?? 0 },
+            { label: 'Avg Tool Calls', value: summary.avg_tool_calls ?? '—' },
+          ].map((card) => (
+            <Card componentId="mlflow.improve.summary-card" key={card.label}>
+              <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase' }}>
+                {card.label}
+              </Typography.Text>
+              <Typography.Title level={4} css={{ marginTop: 4 }}>
+                {card.value}
+              </Typography.Title>
+            </Card>
+          ))}
         </div>
       )}
 
       {/* Suggestions */}
       {analysisResult && analysisResult.suggestions.length > 0 && (
-        <div style={{ marginBottom: theme.spacing.lg }}>
-          <Title level={4} style={{ marginBottom: theme.spacing.sm }}>
-            <FormattedMessage
-              defaultMessage="Suggestions ({count})"
-              description="Suggestions section title"
-              values={{ count: analysisResult.suggestions.length }}
-            />
-          </Title>
+        <div css={{ marginBottom: theme.spacing.lg }}>
+          <Typography.Title level={4} css={{ marginBottom: theme.spacing.sm }}>
+            Suggestions ({analysisResult.suggestions.length})
+          </Typography.Title>
           {analysisResult.suggestions.map((s) => (
-            <Card key={s.id} style={{ marginBottom: theme.spacing.sm }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ display: 'flex', gap: theme.spacing.xs, marginBottom: theme.spacing.xs }}>
-                    <Tag color={SEVERITY_COLORS[s.severity] || 'charcoal'}>{s.severity}</Tag>
-                    <Tag color="charcoal">{TYPE_LABELS[s.type] || s.type}</Tag>
-                    <Text type="secondary" style={{ fontSize: 11 }}>
+            <Card componentId="mlflow.improve.suggestion-card" key={s.id} css={{ marginBottom: theme.spacing.sm }}>
+              <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div css={{ flex: 1 }}>
+                  <div css={{ display: 'flex', gap: theme.spacing.xs, marginBottom: theme.spacing.xs, alignItems: 'center' }}>
+                    <Tag componentId="mlflow.improve.severity-tag" color={SEVERITY_COLORS[s.severity] || 'charcoal'}>
+                      {s.severity}
+                    </Tag>
+                    <Tag componentId="mlflow.improve.type-tag" color="charcoal">
+                      {TYPE_LABELS[s.type] || s.type}
+                    </Tag>
+                    <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm }}>
                       {Math.round(s.confidence * 100)}% confidence
-                    </Text>
+                    </Typography.Text>
                   </div>
-                  <Title level={4} style={{ marginTop: theme.spacing.xs }}>
+                  <Typography.Title level={4} css={{ marginTop: theme.spacing.xs }}>
                     {s.title}
-                  </Title>
-                  <Paragraph type="secondary">{s.description}</Paragraph>
-                  <Card
-                    style={{
-                      marginTop: theme.spacing.sm,
-                      backgroundColor: theme.colors.grey100,
-                    }}
-                  >
-                    <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase' }}>
+                  </Typography.Title>
+                  <Typography.Text color="secondary">{s.description}</Typography.Text>
+                  <Card componentId="mlflow.improve.action-card" css={{ marginTop: theme.spacing.sm }}>
+                    <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase' }}>
                       Recommended action
-                    </Text>
-                    <Paragraph style={{ marginTop: 4 }}>{s.action}</Paragraph>
+                    </Typography.Text>
+                    <Typography.Text css={{ display: 'block', marginTop: 4 }}>{s.action}</Typography.Text>
                   </Card>
                 </div>
                 {repoSaved && (
                   <Button
+                    componentId="mlflow.improve.fix-button"
                     type="primary"
                     loading={isFixing === s.id}
                     onClick={() => triggerFix(s.id)}
-                    style={{ marginLeft: theme.spacing.md }}
+                    css={{ marginLeft: theme.spacing.md }}
                   >
-                    <FormattedMessage defaultMessage="Fix it" description="Button to trigger auto-fix" />
+                    Fix it
                   </Button>
                 )}
               </div>
@@ -336,22 +252,20 @@ export const ExperimentImproveView = ({ experimentId }: ExperimentImproveViewPro
       {/* Findings */}
       {analysisResult && analysisResult.findings.length > 0 && (
         <div>
-          <Title level={4} style={{ marginBottom: theme.spacing.sm }}>
-            <FormattedMessage
-              defaultMessage="Findings ({count})"
-              description="Findings section title"
-              values={{ count: analysisResult.findings.length }}
-            />
-          </Title>
+          <Typography.Title level={4} css={{ marginBottom: theme.spacing.sm }}>
+            Findings ({analysisResult.findings.length})
+          </Typography.Title>
           {analysisResult.findings.map((f, i) => (
-            <Card key={i} style={{ marginBottom: theme.spacing.xs }}>
-              <div style={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'flex-start' }}>
-                <Tag color={SEVERITY_COLORS[f.severity] || 'charcoal'}>{f.severity}</Tag>
+            <Card componentId="mlflow.improve.finding-card" key={i} css={{ marginBottom: theme.spacing.xs }}>
+              <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'flex-start' }}>
+                <Tag componentId="mlflow.improve.finding-severity" color={SEVERITY_COLORS[f.severity] || 'charcoal'}>
+                  {f.severity}
+                </Tag>
                 <div>
-                  <Text strong>{f.pattern.replace(/_/g, ' ')}</Text>
-                  <Paragraph type="secondary" style={{ marginTop: 2 }}>
+                  <Typography.Text bold>{f.pattern.replace(/_/g, ' ')}</Typography.Text>
+                  <Typography.Text color="secondary" css={{ display: 'block', marginTop: 2 }}>
                     {f.description}
-                  </Paragraph>
+                  </Typography.Text>
                 </div>
               </div>
             </Card>
@@ -359,16 +273,16 @@ export const ExperimentImproveView = ({ experimentId }: ExperimentImproveViewPro
         </div>
       )}
 
-      {/* Empty state after analysis */}
+      {/* No issues found */}
       {analysisResult && analysisResult.suggestions.length === 0 && analysisResult.findings.length === 0 && (
-        <Card>
-          <div style={{ textAlign: 'center', padding: theme.spacing.lg }}>
-            <Paragraph type="secondary">
+        <Card componentId="mlflow.improve.no-issues">
+          <div css={{ textAlign: 'center', padding: theme.spacing.lg }}>
+            <Typography.Text color="secondary">
               <FormattedMessage
                 defaultMessage="No issues detected. Your agent is performing within expected parameters."
-                description="No issues found message"
+                description="No issues found"
               />
-            </Paragraph>
+            </Typography.Text>
           </div>
         </Card>
       )}
