@@ -147,17 +147,12 @@ class ClaudeCodeAgent(CodeAgent):
             _logger.warning("gh CLI not found — branch pushed but PR not created")
             return None
 
+        body = self._build_pr_body(request)
         result = subprocess.run(
             [
                 gh_cmd, "pr", "create",
                 "--title", f"[MLflow Improve] Fix: {request.issue_name}",
-                "--body", (
-                    f"## Auto-generated fix by MLflow Improve\n\n"
-                    f"**Issue:** {request.issue_name}\n\n"
-                    f"**Description:** {request.issue_description}\n\n"
-                    f"**Detected by:** `mlflow.genai.improve.analyze()`\n"
-                    f"**Experiment:** {request.experiment_id}\n"
-                ),
+                "--body", body,
                 "--head", branch_name,
             ],
             cwd=repo_dir,
@@ -170,3 +165,35 @@ class ClaudeCodeAgent(CodeAgent):
         else:
             _logger.warning("Failed to create PR: %s", result.stderr)
             return None
+
+    def _build_pr_body(self, request: FixRequest) -> str:
+        sections = [f"## Summary\n\n- Fixed: {request.issue_name}\n- {request.issue_description}"]
+
+        if request.root_causes:
+            causes = "\n".join(f"- {rc}" for rc in request.root_causes if rc)
+            sections.append(f"## Root Cause\n\n{causes}")
+
+        if request.trace_id or request.failing_span:
+            ref_lines = []
+            if request.trace_id:
+                ref_lines.append(f"- Trace ID: `{request.trace_id}`")
+            if request.failing_span:
+                ref_lines.append(f"- Failing span: `{request.failing_span}`")
+            if request.error_message:
+                ref_lines.append(f"- Error: `{request.error_message[:200]}`")
+            sections.append(f"## Trace Reference\n\n" + "\n".join(ref_lines))
+
+        sections.append(
+            "## Test Plan\n\n"
+            "- [ ] Verify the fix resolves the original error\n"
+            "- [ ] Confirm MLflow traces show successful completions\n"
+            "- [ ] Check no regression in related functionality"
+        )
+
+        sections.append(
+            "---\n"
+            "Generated with [Claude Code](https://docs.anthropic.com/en/docs/claude-code) "
+            "via `mlflow.genai.improve`"
+        )
+
+        return "\n\n".join(sections)

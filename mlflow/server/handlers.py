@@ -5005,14 +5005,13 @@ def _invoke_issue_detection_handler():
 @_disable_if_artifacts_only
 def _invoke_improve_analysis_handler():
     """
-    Invoke improve analysis on an experiment's traces asynchronously.
+    Run improve analysis on an experiment's traces and return results.
 
     Analyzes recent traces for performance patterns (context bloat, tool
-    redundancy, score degradation, etc.) and creates Issue entities for
-    each finding. Does not require an LLM API key — analysis is rule-based.
+    redundancy, score degradation, etc.). Does not require an LLM API key
+    — analysis is rule-based on span data.
     """
-    from mlflow.genai.improve.job import invoke_improve_analysis_job
-    from mlflow.server.jobs import submit_job
+    from mlflow.genai.improve import analyze
 
     _validate_content_type(request, ["application/json"])
 
@@ -5026,28 +5025,15 @@ def _invoke_improve_analysis_handler():
     experiment_id = request_json.get("experiment_id")
     trace_count = request_json.get("trace_count", 20)
 
-    tags = {
-        MLFLOW_RUN_TYPE: MLFLOW_RUN_TYPE_IMPROVE_ANALYSIS,
-        "trace_count": str(trace_count),
-    }
-    run = mlflow.start_run(
-        experiment_id=experiment_id,
-        tags=tags,
-    )
-    run_id = run.info.run_id
+    client = MlflowClient()
+    experiment = client.get_experiment(experiment_id)
 
-    job = submit_job(
-        function=invoke_improve_analysis_job,
-        params={
-            "experiment_id": experiment_id,
-            "trace_count": trace_count,
-            "run_id": run_id,
-        },
+    result = analyze(
+        experiment_name=experiment.name,
+        trace_count=trace_count,
     )
-    mlflow.set_tag(MLFLOW_IMPROVE_ANALYSIS_JOB_ID, job.job_id)
-    mlflow.end_run(RunStatus.to_string(RunStatus.RUNNING))
 
-    return jsonify({"job_id": job.job_id, "run_id": run_id})
+    return jsonify(result)
 
 
 @catch_mlflow_exception
@@ -5059,8 +5045,14 @@ def _invoke_improve_fix_handler():
     Reads the experiment's GitHub repo connection tags and uses the
     configured code agent to clone the repo and create a PR.
     """
-    from mlflow.genai.improve.job import invoke_improve_fix_job
-    from mlflow.server.jobs import submit_job
+    from mlflow.genai.improve.code_agent import FixRequest, get_agent
+    from mlflow.utils.mlflow_tags import (
+        MLFLOW_IMPROVE_CODE_AGENT,
+        MLFLOW_IMPROVE_GITHUB_BRANCH,
+        MLFLOW_IMPROVE_GITHUB_REPO,
+    )
+
+    import mlflow.genai.improve.agents  # noqa: F401
 
     _validate_content_type(request, ["application/json"])
 
@@ -5074,27 +5066,38 @@ def _invoke_improve_fix_handler():
     issue_id = request_json.get("issue_id")
     experiment_id = request_json.get("experiment_id")
 
-    tags = {
-        MLFLOW_RUN_TYPE: MLFLOW_RUN_TYPE_IMPROVE_ANALYSIS,
-        "issue_id": issue_id,
-    }
-    run = mlflow.start_run(
+    client = MlflowClient()
+    experiment = client.get_experiment(experiment_id)
+    exp_tags = experiment.tags or {}
+
+    repo_url = exp_tags.get(MLFLOW_IMPROVE_GITHUB_REPO)
+    if not repo_url:
+        raise MlflowException(
+            f"No GitHub repo configured. Set the '{MLFLOW_IMPROVE_GITHUB_REPO}' experiment tag."
+        )
+    branch = exp_tags.get(MLFLOW_IMPROVE_GITHUB_BRANCH, "main")
+    agent_name = exp_tags.get(MLFLOW_IMPROVE_CODE_AGENT, "claude-code")
+
+    suggestion = request_json.get("suggestion", {})
+    fix_request = FixRequest(
+        issue_id=issue_id,
+        issue_name=suggestion.get("title", issue_id),
+        issue_description=suggestion.get("description", ""),
+        root_causes=[suggestion.get("action", "")],
+        repo_url=repo_url,
+        branch=branch,
         experiment_id=experiment_id,
-        tags=tags,
     )
-    run_id = run.info.run_id
 
-    job = submit_job(
-        function=invoke_improve_fix_job,
-        params={
-            "issue_id": issue_id,
-            "experiment_id": experiment_id,
-            "run_id": run_id,
-        },
-    )
-    mlflow.end_run(RunStatus.to_string(RunStatus.RUNNING))
+    agent = get_agent(agent_name)
+    result = agent.create_fix(fix_request)
 
-    return jsonify({"job_id": job.job_id, "run_id": run_id})
+    return jsonify({
+        "success": result.success,
+        "pr_url": result.pr_url,
+        "error": result.error,
+        "changes_summary": result.changes_summary,
+    })
 
 
 @catch_mlflow_exception

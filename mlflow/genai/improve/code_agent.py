@@ -21,6 +21,9 @@ class FixRequest:
     repo_url: str
     branch: str
     experiment_id: str
+    trace_id: str | None = None
+    failing_span: str | None = None
+    error_message: str | None = None
 
 
 @dataclass

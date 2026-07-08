@@ -92,6 +92,22 @@ def analyze(
 
     total_tool_calls = sum(p["tool_call_count"] for p in parsed)
     avg_tool_calls = total_tool_calls / len(parsed) if parsed else 0
+    error_count = sum(1 for p in parsed if p["error_count"] > 0)
+    healthy_count = len(parsed) - error_count
+    latencies = [p["execution_ms"] for p in parsed if p["execution_ms"] > 0]
+    avg_latency_ms = round(sum(latencies) / len(latencies)) if latencies else 0
+
+    alerts = []
+    for p in parsed:
+        if p["error_details"]:
+            first_error = p["error_details"][0]
+            alerts.append({
+                "trace_id": p["trace_id"],
+                "error_message": first_error["error_message"] or "Unknown error",
+                "user_query": p["user_query"] or "",
+                "failing_span": first_error["span_name"],
+                "severity": "high",
+            })
 
     return {
         "findings": [
@@ -117,10 +133,15 @@ def analyze(
             }
             for s in suggestions
         ],
+        "alerts": alerts,
         "summary": {
             "status": "ok",
             "experiment_name": experiment_name,
             "traces_analyzed": len(traces_data),
+            "total_traces": len(parsed),
+            "healthy_count": healthy_count,
+            "error_count": error_count,
+            "avg_latency_ms": avg_latency_ms,
             "findings_count": len(findings),
             "suggestions_count": len(suggestions),
             "avg_tool_calls": round(avg_tool_calls, 1),

@@ -45,13 +45,21 @@ def _extract_span_info(span: dict) -> dict:
 
     span_type = attrs.get("mlflow.spanType", "").strip('"')
     status_code = status.get("code", "") if isinstance(status, dict) else ""
+    status_message = status.get("message", "") if isinstance(status, dict) else ""
+
+    span_inputs = attrs.get("mlflow.spanInputs", "")
+    if isinstance(span_inputs, str):
+        span_inputs = span_inputs.strip('"')
 
     return {
         "name": span.get("name", ""),
         "span_type": span_type,
         "is_error": status_code == "STATUS_CODE_ERROR",
+        "error_message": status_message if status_code == "STATUS_CODE_ERROR" else "",
         "start_ns": int(span.get("start_time_unix_nano", 0)),
         "end_ns": int(span.get("end_time_unix_nano", 0)),
+        "inputs": span_inputs,
+        "parent_span_id": span.get("parent_span_id"),
     }
 
 
@@ -67,19 +75,35 @@ def _parse_trace(trace_row: dict) -> dict:
 
     tool_names = []
     error_count = 0
+    error_details = []
+    user_query = ""
+
     for span in spans:
         info = _extract_span_info(span)
         if info["span_type"] == "TOOL":
             tool_names.append(info["name"])
         if info["is_error"]:
             error_count += 1
+            error_details.append({
+                "span_name": info["name"],
+                "error_message": info["error_message"],
+            })
+        if info["parent_span_id"] in (None, "None", "") and info["inputs"]:
+            try:
+                inputs = json.loads(info["inputs"]) if isinstance(info["inputs"], str) else info["inputs"]
+                if isinstance(inputs, list) and inputs:
+                    first = inputs[0]
+                    user_query = first.get("content", str(first)) if isinstance(first, dict) else str(first)
+                elif isinstance(inputs, str):
+                    user_query = inputs
+            except (json.JSONDecodeError, TypeError):
+                user_query = str(info["inputs"])[:200]
 
     tool_counts = Counter(tool_names)
     unique_tools = set(tool_names)
     duplicates = {name: count for name, count in tool_counts.items() if count > 1}
 
     trace_size = len(json.dumps(spans, default=str).encode())
-
     execution_ms = int(trace_row.get("execution_duration", 0) or 0)
 
     assessments = []
@@ -99,6 +123,8 @@ def _parse_trace(trace_row: dict) -> dict:
         "duplicate_tools": duplicates,
         "tool_call_count": len(tool_names),
         "error_count": error_count,
+        "error_details": error_details,
+        "user_query": user_query,
         "execution_ms": execution_ms,
         "trace_size_bytes": trace_size,
         "assessments": assessments,
