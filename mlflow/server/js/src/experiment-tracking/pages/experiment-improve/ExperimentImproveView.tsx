@@ -152,8 +152,6 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
   const resolvedTitles = new Set(resolvedFixes.map((r) => r.title));
 
   const activeSuggestions = analysisResult?.suggestions.filter((s) => !resolvedTitles.has(s.title)) || [];
-  const resolvedSuggestions = analysisResult?.suggestions.filter((s) => resolvedTitles.has(s.title)) || [];
-  const resolvedFixMap = Object.fromEntries(resolvedFixes.map((r) => [r.title, r]));
 
   return (
     <div css={{ padding: theme.spacing.lg, overflowY: 'auto', height: '100%' }}>
@@ -310,23 +308,23 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
                 </Card>
               )}
 
-              {/* Resolved suggestions */}
-              {resolvedSuggestions.length > 0 && (
+              {/* Resolved fixes */}
+              {resolvedFixes.length > 0 && (
                 <div css={{ marginTop: theme.spacing.lg }}>
                   <Typography.Title level={4} css={{ marginBottom: theme.spacing.sm }}>
-                    Resolved ({resolvedSuggestions.length})
+                    Resolved ({resolvedFixes.length})
                   </Typography.Title>
-                  {resolvedSuggestions.map((s) => (
-                    <Card componentId="mlflow.improve.resolved-card" key={s.id} css={{ marginBottom: theme.spacing.sm, opacity: 0.7 }}>
+                  {resolvedFixes.map((r, i) => (
+                    <Card componentId="mlflow.improve.resolved-card" key={i} css={{ marginBottom: theme.spacing.sm, opacity: 0.7 }}>
                       <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center' }}>
                           <Tag componentId="mlflow.improve.resolved-tag" color="purple">Resolved</Tag>
-                          <Typography.Text>{s.title}</Typography.Text>
+                          <Typography.Text>{r.title}</Typography.Text>
                         </div>
-                        {resolvedFixMap[s.title]?.pr_url && (
+                        {r.pr_url && (
                           <Button
                             componentId="mlflow.improve.view-pr"
-                            onClick={() => window.open(resolvedFixMap[s.title].pr_url, '_blank')}
+                            onClick={() => window.open(r.pr_url, '_blank')}
                           >
                             View PR
                           </Button>
