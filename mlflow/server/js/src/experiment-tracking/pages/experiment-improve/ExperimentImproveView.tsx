@@ -29,10 +29,17 @@ interface Alert {
   severity: string;
 }
 
+interface ResolvedFix {
+  issue_id: string;
+  title: string;
+  pr_url: string;
+}
+
 interface AnalysisResult {
   findings: Finding[];
   suggestions: Suggestion[];
   alerts: Alert[];
+  resolved_fixes?: ResolvedFix[];
   summary: {
     status: string;
     total_traces?: number;
@@ -141,6 +148,12 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
 
   const summary = analysisResult?.summary;
   const alerts = analysisResult?.alerts || [];
+  const resolvedFixes = analysisResult?.resolved_fixes || [];
+  const resolvedTitles = new Set(resolvedFixes.map((r) => r.title));
+
+  const activeSuggestions = analysisResult?.suggestions.filter((s) => !resolvedTitles.has(s.title)) || [];
+  const resolvedSuggestions = analysisResult?.suggestions.filter((s) => resolvedTitles.has(s.title)) || [];
+  const resolvedFixMap = Object.fromEntries(resolvedFixes.map((r) => [r.title, r]));
 
   return (
     <div css={{ padding: theme.spacing.lg, overflowY: 'auto', height: '100%' }}>
@@ -239,7 +252,7 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
         <Tabs.Root componentId="mlflow.improve.tabs" defaultValue="optimization" valueHasNoPii>
           <Tabs.List>
             <Tabs.Trigger value="optimization">
-              Self-Optimization ({analysisResult.suggestions.length})
+              Self-Optimization ({activeSuggestions.length})
             </Tabs.Trigger>
             <Tabs.Trigger value="healing">
               Self-Healing ({alerts.length})
@@ -249,12 +262,12 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
           {/* Self-Optimization Tab */}
           <Tabs.Content value="optimization">
             <div css={{ paddingTop: theme.spacing.md }}>
-              {analysisResult.suggestions.length > 0 ? (
+              {activeSuggestions.length > 0 ? (
                 <div css={{ marginBottom: theme.spacing.lg }}>
                   <Typography.Title level={4} css={{ marginBottom: theme.spacing.sm }}>
-                    Suggestions ({analysisResult.suggestions.length})
+                    Active Suggestions ({activeSuggestions.length})
                   </Typography.Title>
-                  {analysisResult.suggestions.map((s) => (
+                  {activeSuggestions.map((s) => (
                     <Card componentId="mlflow.improve.suggestion-card" key={s.id} css={{ marginBottom: theme.spacing.sm }}>
                       <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: theme.spacing.xs }}>
                         <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center' }}>
@@ -291,10 +304,37 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
                 <Card componentId="mlflow.improve.no-suggestions">
                   <div css={{ textAlign: 'center', padding: theme.spacing.lg }}>
                     <Typography.Text color="secondary">
-                      No optimization suggestions. Your agent is performing well.
+                      No active optimization suggestions. Your agent is performing well.
                     </Typography.Text>
                   </div>
                 </Card>
+              )}
+
+              {/* Resolved suggestions */}
+              {resolvedSuggestions.length > 0 && (
+                <div css={{ marginTop: theme.spacing.lg }}>
+                  <Typography.Title level={4} css={{ marginBottom: theme.spacing.sm }}>
+                    Resolved ({resolvedSuggestions.length})
+                  </Typography.Title>
+                  {resolvedSuggestions.map((s) => (
+                    <Card componentId="mlflow.improve.resolved-card" key={s.id} css={{ marginBottom: theme.spacing.sm, opacity: 0.7 }}>
+                      <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center' }}>
+                          <Tag componentId="mlflow.improve.resolved-tag" color="purple">Resolved</Tag>
+                          <Typography.Text>{s.title}</Typography.Text>
+                        </div>
+                        {resolvedFixMap[s.title]?.pr_url && (
+                          <Button
+                            componentId="mlflow.improve.view-pr"
+                            onClick={() => window.open(resolvedFixMap[s.title].pr_url, '_blank')}
+                          >
+                            View PR
+                          </Button>
+                        )}
+                      </div>
+                    </Card>
+                  ))}
+                </div>
               )}
 
             </div>

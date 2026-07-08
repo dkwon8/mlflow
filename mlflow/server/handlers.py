@@ -5033,6 +5033,16 @@ def _invoke_improve_analysis_handler():
         trace_count=trace_count,
     )
 
+    import json as _json
+
+    exp_tags = experiment.tags or {}
+    resolved_raw = exp_tags.get("mlflow.improve.resolved_fixes", "[]")
+    try:
+        resolved = _json.loads(resolved_raw)
+    except (ValueError, TypeError):
+        resolved = []
+    result["resolved_fixes"] = resolved
+
     return jsonify(result)
 
 
@@ -5091,6 +5101,21 @@ def _invoke_improve_fix_handler():
 
     agent = get_agent(agent_name)
     result = agent.create_fix(fix_request)
+
+    if result.success and result.pr_url:
+        import json as _json
+
+        resolved_raw = exp_tags.get("mlflow.improve.resolved_fixes", "[]")
+        try:
+            resolved = _json.loads(resolved_raw)
+        except (ValueError, TypeError):
+            resolved = []
+        resolved.append({
+            "issue_id": issue_id,
+            "title": suggestion.get("title", ""),
+            "pr_url": result.pr_url,
+        })
+        client.set_experiment_tag(experiment_id, "mlflow.improve.resolved_fixes", _json.dumps(resolved))
 
     return jsonify({
         "success": result.success,
