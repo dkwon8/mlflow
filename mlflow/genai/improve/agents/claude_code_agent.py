@@ -1,84 +1,129 @@
 """
 Claude Code agent implementation for creating fix PRs.
 
-Clones the repository, runs Claude Code CLI to analyze the issue
-and create a fix, then opens a pull request on GitHub.
+Uses the Claude Agent SDK (claude-agent-sdk) for dynamic code analysis
+and fix generation. Falls back to the Claude CLI if the SDK is not installed.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 from mlflow.genai.improve.code_agent import CodeAgent, FixRequest, FixResult
+from mlflow.genai.improve.code_analyzer import clone_or_fetch_repo
 
 _logger = logging.getLogger(__name__)
 
 
+def _sdk_available() -> bool:
+    try:
+        import claude_agent_sdk  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 class ClaudeCodeAgent(CodeAgent):
-    """Code agent that uses Claude Code CLI to create fix PRs."""
+    """Code agent that uses Claude Agent SDK to analyze code and create fix PRs.
+
+    Dynamically reads the repository, reasons about the issue, edits files,
+    and opens a pull request — all through the SDK's built-in capabilities.
+    Falls back to the Claude CLI (claude -p) if the SDK is not installed.
+    """
 
     def name(self) -> str:
         return "claude-code"
 
     def create_fix(self, request: FixRequest) -> FixResult:
-        cli_cmd = shutil.which("claude")
-        if not cli_cmd:
-            return FixResult(
-                success=False,
-                error="Claude Code CLI not found. Install it: https://docs.anthropic.com/en/docs/claude-code",
-            )
-
-        tmpdir = tempfile.mkdtemp(prefix="mlflow-improve-")
         try:
-            repo_dir = self._clone_repo(request.repo_url, request.branch, tmpdir)
+            repo_dir = clone_or_fetch_repo(request.repo_url, request.branch)
             branch_name = f"improve/fix-{request.issue_id[:12]}"
             self._create_branch(repo_dir, branch_name)
 
             prompt = self._build_prompt(request)
-            result = self._run_claude(cli_cmd, repo_dir, prompt)
 
-            if result.returncode != 0:
-                return FixResult(
-                    success=False,
-                    error=f"Claude Code exited with code {result.returncode}: {result.stderr[:500]}",
+            if _sdk_available():
+                _logger.info("Using Claude Agent SDK for fix")
+                result_text = asyncio.run(
+                    self._run_sdk(repo_dir, prompt)
                 )
+            else:
+                _logger.info("Claude Agent SDK not available, falling back to CLI")
+                cli_result = self._run_cli(repo_dir, prompt)
+                if cli_result is None:
+                    return FixResult(
+                        success=False,
+                        error="Claude Code CLI not found. Install claude-agent-sdk or the Claude CLI.",
+                    )
+                if cli_result.returncode != 0:
+                    return FixResult(
+                        success=False,
+                        error=f"Claude Code exited with code {cli_result.returncode}: {cli_result.stderr[:500]}",
+                    )
+                result_text = cli_result.stdout[:1000]
 
             pr_url = self._create_pr(repo_dir, branch_name, request)
             if pr_url:
                 return FixResult(
                     success=True,
                     pr_url=pr_url,
-                    changes_summary=result.stdout[:1000],
+                    changes_summary=result_text[:1000] if result_text else None,
                 )
             else:
                 return FixResult(
                     success=False,
-                    error="Claude Code ran but no changes were made to create a PR.",
+                    error="Agent ran but no changes were made to create a PR.",
                 )
         except Exception as e:
             _logger.exception("Failed to create fix PR")
             return FixResult(success=False, error=str(e))
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def _clone_repo(self, repo_url: str, branch: str, tmpdir: str) -> Path:
-        if not repo_url.startswith("http"):
-            repo_url = f"https://github.com/{repo_url}.git"
-        elif not repo_url.endswith(".git"):
-            repo_url = f"{repo_url}.git"
+    async def _run_sdk(self, repo_dir: Path, prompt: str) -> str:
+        """Run the Claude Agent SDK to analyze and fix code."""
+        from claude_agent_sdk import ClaudeSDKClient
 
-        repo_dir = Path(tmpdir) / "repo"
-        subprocess.run(
-            ["git", "clone", "--depth", "1", "--branch", branch, repo_url, str(repo_dir)],
-            check=True,
+        try:
+            import mlflow.anthropic
+            mlflow.anthropic.autolog()
+        except Exception:
+            pass
+
+        messages = []
+        async with ClaudeSDKClient(cwd=str(repo_dir)) as client:
+            await client.query(prompt)
+
+            async for message in client.receive_response():
+                messages.append(message)
+
+        text_parts = []
+        for msg in messages:
+            if hasattr(msg, "content"):
+                content = msg.content
+                if isinstance(content, str):
+                    text_parts.append(content)
+                elif isinstance(content, list):
+                    for block in content:
+                        if hasattr(block, "text"):
+                            text_parts.append(block.text)
+
+        return "\n".join(text_parts)
+
+    def _run_cli(self, repo_dir: Path, prompt: str) -> subprocess.CompletedProcess | None:
+        """Fallback: run Claude Code CLI."""
+        cli_cmd = shutil.which("claude")
+        if not cli_cmd:
+            return None
+        return subprocess.run(
+            [cli_cmd, "-p", prompt, "--dangerously-skip-permissions"],
+            cwd=repo_dir,
             capture_output=True,
             text=True,
+            timeout=300,
         )
-        return repo_dir
 
     def _create_branch(self, repo_dir: Path, branch_name: str):
         subprocess.run(
@@ -90,33 +135,37 @@ class ClaudeCodeAgent(CodeAgent):
 
     def _build_prompt(self, request: FixRequest) -> str:
         root_causes = "\n".join(f"- {rc}" for rc in request.root_causes if rc)
-        return (
-            f"Fix the following issue detected by MLflow's improve system.\n\n"
-            f"Issue: {request.issue_name}\n\n"
-            f"Description: {request.issue_description}\n\n"
-            f"Root causes:\n{root_causes}\n\n"
-            f"Analyze the codebase, find the source of this issue, and fix it. "
-            f"Make minimal, targeted changes. Commit your changes with a clear message."
+
+        parts = [
+            f"Fix the following issue detected by MLflow's improve system.\n",
+            f"Issue: {request.issue_name}\n",
+            f"Description: {request.issue_description}\n",
+            f"Root causes:\n{root_causes}\n",
+        ]
+
+        if request.code_findings:
+            parts.append("Code analysis findings:\n")
+            for cf in request.code_findings[:5]:
+                parts.append(
+                    f"- [{cf.get('severity', '')}] {cf.get('description', '')} "
+                    f"in {cf.get('file_path', 'unknown')}\n"
+                    f"  Fix: {cf.get('suggested_fix', 'N/A')}\n"
+                )
+
+        parts.append(
+            "\nAnalyze the codebase, find the source of this issue, and fix it. "
+            "Make minimal, targeted changes. Commit your changes with a clear message."
         )
 
-    def _run_claude(self, cli_cmd: str, repo_dir: Path, prompt: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [cli_cmd, "-p", prompt, "--dangerously-skip-permissions"],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        return "\n".join(parts)
 
     def _create_pr(self, repo_dir: Path, branch_name: str, request: FixRequest) -> str | None:
-        # Check for committed changes on this branch vs origin
         diff = subprocess.run(
             ["git", "log", "origin/" + request.branch + "..HEAD", "--oneline"],
             cwd=repo_dir,
             capture_output=True,
             text=True,
         )
-        # Also check for uncommitted changes
         status = subprocess.run(
             ["git", "status", "--porcelain"],
             cwd=repo_dir,
@@ -126,7 +175,6 @@ class ClaudeCodeAgent(CodeAgent):
         if not diff.stdout.strip() and not status.stdout.strip():
             return None
 
-        # Stage and commit any uncommitted changes
         if status.stdout.strip():
             subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True, capture_output=True)
             subprocess.run(
@@ -181,7 +229,7 @@ class ClaudeCodeAgent(CodeAgent):
                 ref_lines.append(f"- Failing span: `{request.failing_span}`")
             if request.error_message:
                 ref_lines.append(f"- Error: `{request.error_message[:200]}`")
-            sections.append(f"## Trace Reference\n\n" + "\n".join(ref_lines))
+            sections.append("## Trace Reference\n\n" + "\n".join(ref_lines))
 
         sections.append(
             "## Test Plan\n\n"

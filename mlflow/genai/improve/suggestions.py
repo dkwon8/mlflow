@@ -248,6 +248,53 @@ def _handle_incomplete_pipeline(finding: Finding) -> Suggestion:
     )
 
 
+def _handle_code_finding(finding: Finding) -> Suggestion:
+    """Generic handler for LLM-detected code findings.
+
+    Uses the root_cause and suggested_fix from the LLM analysis directly
+    instead of hardcoded static text.
+    """
+    evidence = finding.evidence or {}
+    file_path = evidence.get("file_path", "unknown file")
+    root_cause = evidence.get("root_cause", finding.description)
+    suggested_fix = evidence.get("suggested_fix", "Review the code and apply a fix.")
+    confidence = evidence.get("confidence", 0.7)
+    if isinstance(confidence, (int, float)):
+        confidence = float(confidence)
+    else:
+        confidence = 0.7
+
+    type_map = {
+        "anti_pattern": "prompt_fix",
+        "prompt_quality": "prompt_fix",
+        "config_issue": "config_change",
+        "missing_error_handling": "prompt_fix",
+        "context_management": "model_upgrade",
+        "tool_schema": "prompt_fix",
+        "performance": "config_change",
+        "security": "investigate",
+    }
+
+    return Suggestion(
+        id=_next_id(),
+        type=type_map.get(finding.pattern, "investigate"),
+        severity=finding.severity,
+        title=f"[Code] {finding.description[:80]}",
+        description=f"In `{file_path}`: {root_cause}",
+        action=suggested_fix,
+        confidence=confidence,
+        auto_applicable=False,
+        evidence=finding.evidence,
+    )
+
+
+_CODE_FINDING_PATTERNS = {
+    "anti_pattern", "prompt_quality", "config_issue",
+    "missing_error_handling", "context_management",
+    "tool_schema", "performance", "security",
+}
+
+
 _PATTERN_HANDLERS = {
     "context_bloat": _handle_context_bloat,
     "context_growth": _handle_context_growth,
@@ -259,3 +306,6 @@ _PATTERN_HANDLERS = {
     "error_spike": _handle_error_spike,
     "incomplete_pipeline": _handle_incomplete_pipeline,
 }
+
+for _pattern in _CODE_FINDING_PATTERNS:
+    _PATTERN_HANDLERS[_pattern] = _handle_code_finding

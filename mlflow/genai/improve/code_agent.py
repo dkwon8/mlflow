@@ -24,6 +24,7 @@ class FixRequest:
     trace_id: str | None = None
     failing_span: str | None = None
     error_message: str | None = None
+    code_findings: list[dict] = field(default_factory=list)
 
 
 @dataclass

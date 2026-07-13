@@ -5005,11 +5005,13 @@ def _invoke_issue_detection_handler():
 @_disable_if_artifacts_only
 def _invoke_improve_analysis_handler():
     """
-    Run improve analysis on an experiment's traces and return results.
+    Run improve analysis on an experiment's traces and/or repository code.
 
-    Analyzes recent traces for performance patterns (context bloat, tool
-    redundancy, score degradation, etc.). Does not require an LLM API key
-    — analysis is rule-based on span data.
+    Supports multiple analysis modes:
+    - "auto": Runs both trace and code analysis if available (default)
+    - "traces_only": Traditional rule-based trace analysis
+    - "code_only": LLM-powered code analysis (no traces needed)
+    - "both": Explicitly run both
     """
     from mlflow.genai.improve import analyze
 
@@ -5019,23 +5021,34 @@ def _invoke_improve_analysis_handler():
         schema={
             "experiment_id": [_assert_required, _assert_string],
             "trace_count": [_assert_intlike],
+            "mode": [_assert_string],
+            "model": [_assert_string],
         }
     )
 
     experiment_id = request_json.get("experiment_id")
     trace_count = request_json.get("trace_count", 20)
+    mode = request_json.get("mode", "auto")
+    model = request_json.get("model", "openai:/gpt-5.4-mini")
 
     client = MlflowClient()
     experiment = client.get_experiment(experiment_id)
+    exp_tags = experiment.tags or {}
+
+    repo_url = exp_tags.get("mlflow.improve.github_repo")
+    branch = exp_tags.get("mlflow.improve.github_branch", "main")
 
     result = analyze(
         experiment_name=experiment.name,
         trace_count=trace_count,
+        repo_url=repo_url,
+        branch=branch,
+        model=model,
+        mode=mode,
     )
 
     import json as _json
 
-    exp_tags = experiment.tags or {}
     resolved_raw = exp_tags.get("mlflow.improve.resolved_fixes", "[]")
     try:
         resolved = _json.loads(resolved_raw)
@@ -5089,6 +5102,7 @@ def _invoke_improve_fix_handler():
     agent_name = exp_tags.get(MLFLOW_IMPROVE_CODE_AGENT, "claude-code")
 
     suggestion = request_json.get("suggestion", {})
+    code_findings = request_json.get("code_findings", [])
     fix_request = FixRequest(
         issue_id=issue_id,
         issue_name=suggestion.get("title", issue_id),
@@ -5097,6 +5111,7 @@ def _invoke_improve_fix_handler():
         repo_url=repo_url,
         branch=branch,
         experiment_id=experiment_id,
+        code_findings=code_findings,
     )
 
     agent = get_agent(agent_name)
