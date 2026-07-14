@@ -796,3 +796,16 @@ def register_periodic_tasks(huey_instance) -> None:
         "Registered trace_archival_scheduler periodic task (polls every 1 minute and "
         "no-ops when trace archival is disabled or unconfigured)"
     )
+
+    @huey_instance.periodic_task(crontab(minute="*/1"))
+    @huey_instance.lock_task("improve-monitoring-scheduler-lock")
+    def improve_monitoring_scheduler():
+        """Runs every minute; delegates cadence control to per-experiment rate limiting."""
+        from mlflow.genai.improve.scheduler import run_improve_monitoring_scheduler
+
+        try:
+            run_improve_monitoring_scheduler()
+        except Exception as e:
+            _logger.exception(f"Improve monitoring scheduler failed: {e!r}")
+
+    _logger.info("Registered improve_monitoring_scheduler periodic task (polls every 1 minute)")

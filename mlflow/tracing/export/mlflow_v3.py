@@ -57,6 +57,9 @@ class MlflowV3SpanExporter(SpanExporter):
         self._deferred_root_spans: dict[int, ReadableSpan] = {}
         self._deferred_lock = threading.Lock()
 
+        # Experiments already checked for repo auto-propagation (avoid repeated store calls).
+        self._experiments_repo_checked: set[str] = set()
+
     def export(self, spans: Sequence[ReadableSpan]) -> None:
         """
         Export the spans to the destination.
@@ -290,6 +293,60 @@ class MlflowV3SpanExporter(SpanExporter):
             )
         except Exception as e:
             _logger.warning(f"Failed to link prompts to trace: {e}")
+
+        self._maybe_propagate_repo_to_experiment(trace)
+
+    def _maybe_propagate_repo_to_experiment(self, trace: Trace) -> None:
+        """Auto-tag the experiment with the GitHub repo URL from trace metadata."""
+        try:
+            metadata = trace.info.trace_metadata or {}
+            repo_url = metadata.get("mlflow.source.git.repoURL")
+            if not repo_url:
+                return
+
+            experiment_id = trace.info.experiment_id
+            if not experiment_id:
+                return
+
+            if experiment_id in self._experiments_repo_checked:
+                return
+            self._experiments_repo_checked.add(experiment_id)
+
+            from mlflow.genai.improve.utils import normalize_repo_url
+
+            normalized = normalize_repo_url(repo_url)
+            if not normalized:
+                return
+
+            from mlflow.entities.experiment_tag import ExperimentTag
+            from mlflow.utils.mlflow_tags import (
+                MLFLOW_IMPROVE_GITHUB_BRANCH,
+                MLFLOW_IMPROVE_GITHUB_REPO,
+                MLFLOW_IMPROVE_GITHUB_REPO_SOURCE,
+            )
+
+            exp = self._client.store.get_experiment(experiment_id)
+            if exp.tags.get(MLFLOW_IMPROVE_GITHUB_REPO):
+                return
+
+            self._client.store.set_experiment_tag(
+                experiment_id, ExperimentTag(MLFLOW_IMPROVE_GITHUB_REPO, normalized)
+            )
+            self._client.store.set_experiment_tag(
+                experiment_id, ExperimentTag(MLFLOW_IMPROVE_GITHUB_REPO_SOURCE, "auto")
+            )
+
+            branch = metadata.get("mlflow.source.git.branch")
+            if branch:
+                self._client.store.set_experiment_tag(
+                    experiment_id, ExperimentTag(MLFLOW_IMPROVE_GITHUB_BRANCH, branch)
+                )
+
+            _logger.info(
+                "Auto-propagated GitHub repo %s to experiment %s", normalized, experiment_id
+            )
+        except Exception:
+            _logger.debug("Failed to auto-propagate repo to experiment", exc_info=True)
 
     def _should_enable_async_logging(self) -> bool:
         if is_in_databricks_notebook():

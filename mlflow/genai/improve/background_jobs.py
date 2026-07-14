@@ -88,10 +88,10 @@ def invoke_improve_fix_job(
     then uses the configured code agent to clone the repo, analyze
     the issue, and create a pull request with a fix.
     """
-    from mlflow.genai.improve.code_agent import FixRequest, get_agent
+    from mlflow.genai.improve.fix_agent_registry import FixRequest, get_agent
 
     # Ensure built-in agents are registered
-    import mlflow.genai.improve.agents  # noqa: F401
+    import mlflow.genai.improve.fix_agents  # noqa: F401
 
     from mlflow.tracing.client import TracingClient
 

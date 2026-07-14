@@ -99,7 +99,15 @@ def clone_or_fetch_repo(repo_url: str, branch: str = "main") -> Path:
     if cache_key in _repo_cache:
         cached = _repo_cache[cache_key]
         if cached.exists():
-            _logger.debug("Using cached repo at %s", cached)
+            _logger.debug("Refreshing cached repo at %s", cached)
+            subprocess.run(
+                ["git", "fetch", "origin", branch],
+                cwd=cached, capture_output=True, text=True, timeout=60,
+            )
+            subprocess.run(
+                ["git", "reset", "--hard", f"origin/{branch}"],
+                cwd=cached, capture_output=True, text=True, timeout=30,
+            )
             return cached
         del _repo_cache[cache_key]
 
@@ -114,7 +122,7 @@ def clone_or_fetch_repo(repo_url: str, branch: str = "main") -> Path:
 
     _logger.info("Cloning %s (branch: %s)", normalized_url, branch)
     subprocess.run(
-        ["git", "clone", "--depth", "1", "--branch", branch,
+        ["git", "clone", "--single-branch", "--branch", branch,
          normalized_url, str(repo_dir)],
         check=True,
         capture_output=True,

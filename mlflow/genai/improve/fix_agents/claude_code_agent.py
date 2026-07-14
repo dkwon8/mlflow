@@ -11,9 +11,10 @@ import asyncio
 import logging
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
-from mlflow.genai.improve.code_agent import CodeAgent, FixRequest, FixResult
+from mlflow.genai.improve.fix_agent_registry import CodeAgent, FixRequest, FixResult
 from mlflow.genai.improve.code_analyzer import clone_or_fetch_repo
 
 _logger = logging.getLogger(__name__)
@@ -40,7 +41,10 @@ class ClaudeCodeAgent(CodeAgent):
 
     def create_fix(self, request: FixRequest) -> FixResult:
         try:
-            repo_dir = clone_or_fetch_repo(request.repo_url, request.branch)
+            cached_dir = clone_or_fetch_repo(request.repo_url, request.branch)
+            work_dir = Path(tempfile.mkdtemp(prefix="mlflow-fix-"))
+            shutil.copytree(cached_dir, work_dir / "repo", dirs_exist_ok=True)
+            repo_dir = work_dir / "repo"
             branch_name = f"improve/fix-{request.issue_id[:12]}"
             self._create_branch(repo_dir, branch_name)
 

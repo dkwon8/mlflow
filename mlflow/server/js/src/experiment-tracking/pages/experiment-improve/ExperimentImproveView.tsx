@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Button, Card, Input, SparkleIcon, Tabs, Tag, Typography, useDesignSystemTheme } from '@databricks/design-system';
 import type { TagColors } from '@databricks/design-system';
 import { FormattedMessage } from 'react-intl';
@@ -43,6 +43,7 @@ interface ResolvedFix {
   issue_id: string;
   title: string;
   pr_url: string;
+  repo_url?: string;
 }
 
 interface AnalysisResult {
@@ -89,7 +90,33 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
   const [error, setError] = useState<string | null>(null);
   const [githubRepo, setGithubRepo] = useState('');
   const [repoSaved, setRepoSaved] = useState(false);
+  const [repoSource, setRepoSource] = useState<'auto' | 'manual' | null>(null);
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
+
+  useEffect(() => {
+    const loadExperimentTags = async () => {
+      try {
+        const response = await fetch(
+          getAjaxUrl(`ajax-api/2.0/mlflow/experiments/get?experiment_id=${experimentId}`),
+        );
+        if (response.ok) {
+          const data = await response.json();
+          const tags = data.experiment?.tags || [];
+          const repoTag = tags.find((t: any) => t.key === 'mlflow.improve.github_repo');
+          const sourceTag = tags.find((t: any) => t.key === 'mlflow.improve.github_repo_source');
+          if (repoTag?.value) {
+            setGithubRepo(repoTag.value);
+            setRepoSaved(true);
+            setRepoSource((sourceTag?.value as 'auto' | 'manual') || 'manual');
+          }
+        }
+      } catch {
+        // Non-critical — tags will just start empty
+      }
+    };
+    loadExperimentTags();
+  }, [experimentId]);
+
   const runAnalysis = useCallback(async () => {
     setIsAnalyzing(true);
     setError(null);
@@ -157,16 +184,25 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ experiment_id: experimentId, key: 'mlflow.improve.github_repo', value: githubRepo }),
       });
+      await fetch(getAjaxUrl('ajax-api/2.0/mlflow/experiments/set-experiment-tag'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ experiment_id: experimentId, key: 'mlflow.improve.github_repo_source', value: 'manual' }),
+      });
       setRepoSaved(true);
+      setRepoSource('manual');
+      setAnalysisResult(null);
     } catch (e) {
       setError('Failed to save GitHub repo');
     }
   }, [experimentId, githubRepo]);
 
+
   const summary = analysisResult?.summary;
   const alerts = analysisResult?.alerts || [];
   const codeFindings = analysisResult?.code_findings || [];
-  const resolvedFixes = analysisResult?.resolved_fixes || [];
+  const allResolvedFixes = analysisResult?.resolved_fixes || [];
+  const resolvedFixes = allResolvedFixes.filter((r) => !r.repo_url || r.repo_url === githubRepo);
   const resolvedTitles = new Set(resolvedFixes.map((r) => r.title));
 
   const activeSuggestions = analysisResult?.suggestions.filter((s) => !resolvedTitles.has(s.title)) || [];
@@ -209,7 +245,7 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
             componentId="mlflow.improve.github-input"
             placeholder="owner/repo-name"
             value={githubRepo}
-            onChange={(e) => { setGithubRepo(e.target.value); setRepoSaved(false); }}
+            onChange={(e) => { setGithubRepo(e.target.value); setRepoSaved(false); setAnalysisResult(null); }}
             css={{ flex: 1 }}
           />
           <Button componentId="mlflow.improve.connect-repo" onClick={saveGithubRepo} disabled={!githubRepo || repoSaved}>
@@ -222,6 +258,11 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
             >
               View Repo
             </Button>
+          )}
+          {repoSaved && repoSource === 'auto' && (
+            <Tag componentId="mlflow.improve.auto-detected" color="teal">
+              Auto-detected from traces
+            </Tag>
           )}
         </div>
       </Card>

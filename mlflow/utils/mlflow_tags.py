@@ -51,6 +51,9 @@ MLFLOW_IMPROVE_ANALYSIS_JOB_ID = "mlflow.improveAnalysis.jobId"
 MLFLOW_IMPROVE_GITHUB_REPO = "mlflow.improve.github_repo"
 MLFLOW_IMPROVE_GITHUB_BRANCH = "mlflow.improve.github_branch"
 MLFLOW_IMPROVE_CODE_AGENT = "mlflow.improve.code_agent"
+MLFLOW_IMPROVE_GITHUB_REPO_SOURCE = "mlflow.improve.github_repo_source"
+MLFLOW_IMPROVE_LAST_MONITOR_TIME = "mlflow.improve.last_monitor_time"
+MLFLOW_IMPROVE_AUTO_FIX = "mlflow.improve.auto_fix"
 
 # The ID of the job that is running the UI-triggered mlflow.genai.evaluate flow
 MLFLOW_GENAI_EVALUATE_JOB_ID = "mlflow.genaiEvaluate.jobId"

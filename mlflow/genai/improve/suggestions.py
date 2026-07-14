@@ -8,8 +8,9 @@ confidence level.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
-from .analyzer import Finding
+from .trace_analyzer import Finding
 
 
 @dataclass
@@ -26,13 +27,9 @@ class Suggestion:
     evidence: dict = field(default_factory=dict)
 
 
-_SUGGESTION_COUNTER = 0
-
-
-def _next_id() -> str:
-    global _SUGGESTION_COUNTER
-    _SUGGESTION_COUNTER += 1
-    return f"s-{_SUGGESTION_COUNTER:04d}"
+def _make_id(pattern: str, description: str) -> str:
+    digest = hashlib.sha256(f"{pattern}:{description}".encode()).hexdigest()[:8]
+    return f"s-{digest}"
 
 
 def generate_suggestions(findings: list[Finding]) -> list[Suggestion]:
@@ -62,14 +59,14 @@ def _handle_context_bloat(finding: Finding) -> Suggestion:
     avg_size = finding.evidence.get("avg_size_bytes", 0)
 
     return Suggestion(
-        id=_next_id(),
+        id=_make_id(finding.pattern, finding.description),
         type="model_upgrade",
         severity=finding.severity,
         title="Context window pressure detected",
         description=(
             f"Traces are averaging {avg_size / 1_000_000:.1f}MB "
             f"(max {max_size / 1_000_000:.1f}MB). "
-            f"As resume count grows, the context window will fill up "
+            f"As input volume grows, the context window will fill up "
             f"and the agent will start dropping information or failing."
         ),
         action="Switch to a model with a larger context window (e.g., gpt-5.4-max with 1M tokens).",
@@ -83,14 +80,14 @@ def _handle_context_growth(finding: Finding) -> Suggestion:
     ratio = finding.evidence.get("growth_ratio", 1)
 
     return Suggestion(
-        id=_next_id(),
+        id=_make_id(finding.pattern, finding.description),
         type="investigate",
         severity=finding.severity,
         title="Trace sizes growing over time",
         description=(
             f"Recent traces are {ratio:.1f}x larger than older ones. "
             f"This could indicate conversation history accumulation, "
-            f"larger resume batches, or unnecessary data in tool responses."
+            f"larger input batches, or unnecessary data in tool responses."
         ),
         action="Review conversation history management. Consider summarizing earlier turns instead of keeping full history.",
         confidence=0.6,
@@ -105,7 +102,7 @@ def _handle_tool_redundancy(finding: Finding) -> Suggestion:
     rate = finding.evidence.get("rate", 0)
 
     return Suggestion(
-        id=_next_id(),
+        id=_make_id(finding.pattern, finding.description),
         type="prompt_fix",
         severity=finding.severity,
         title=f"Redundant tool calls: {worst}",
@@ -113,7 +110,7 @@ def _handle_tool_redundancy(finding: Finding) -> Suggestion:
             f"The agent is calling {worst} multiple times in {rate:.0%} of runs. "
             f"This wastes API calls and increases latency."
         ),
-        action=f"Add instruction to the system prompt: 'Do not call {worst} more than once per pipeline run unless processing different candidates.'",
+        action=f"Add instruction to the system prompt: 'Do not call {worst} more than once per pipeline run unless processing different inputs.'",
         confidence=0.75,
         auto_applicable=False,
         evidence=finding.evidence,
@@ -132,7 +129,7 @@ def _handle_score_degradation(finding: Finding) -> Suggestion:
     }
 
     return Suggestion(
-        id=_next_id(),
+        id=_make_id(finding.pattern, finding.description),
         type="prompt_fix" if scorer in action_map else "investigate",
         severity=finding.severity,
         title=f"{scorer} score is low ({pass_rate:.0%})",
@@ -153,7 +150,7 @@ def _handle_score_declining(finding: Finding) -> Suggestion:
     older = finding.evidence.get("older_rate", 0)
 
     return Suggestion(
-        id=_next_id(),
+        id=_make_id(finding.pattern, finding.description),
         type="investigate",
         severity=finding.severity,
         title=f"{scorer} quality declining",
@@ -172,7 +169,7 @@ def _handle_slow_execution(finding: Finding) -> Suggestion:
     avg_ms = finding.evidence.get("avg_ms", 0)
 
     return Suggestion(
-        id=_next_id(),
+        id=_make_id(finding.pattern, finding.description),
         type="config_change",
         severity=finding.severity,
         title=f"Slow pipeline ({avg_ms / 1000:.0f}s average)",
@@ -181,7 +178,7 @@ def _handle_slow_execution(finding: Finding) -> Suggestion:
             f"This may be due to large batch sizes, many scoring passes, "
             f"or slow tool responses."
         ),
-        action="Consider reducing scoring passes from 3 to 1 for initial filtering, or processing resumes in smaller batches.",
+        action="Consider reducing tool call passes, processing inputs in smaller batches, or switching to a faster model.",
         confidence=0.6,
         auto_applicable=False,
         evidence=finding.evidence,
@@ -192,7 +189,7 @@ def _handle_execution_slowdown(finding: Finding) -> Suggestion:
     ratio = finding.evidence.get("ratio", 1)
 
     return Suggestion(
-        id=_next_id(),
+        id=_make_id(finding.pattern, finding.description),
         type="investigate",
         severity=finding.severity,
         title=f"Execution time increasing ({ratio:.1f}x slower)",
@@ -201,7 +198,7 @@ def _handle_execution_slowdown(finding: Finding) -> Suggestion:
             f"This could indicate growing input size, API rate limiting, "
             f"or context window pressure."
         ),
-        action="Check if resume count has increased. Monitor API response times. Consider if the model needs upgrading.",
+        action="Check if input volume has increased. Monitor API response times. Consider if the model needs upgrading.",
         confidence=0.6,
         auto_applicable=False,
         evidence=finding.evidence,
@@ -213,7 +210,7 @@ def _handle_error_spike(finding: Finding) -> Suggestion:
     rate = finding.evidence.get("error_rate", 0)
 
     return Suggestion(
-        id=_next_id(),
+        id=_make_id(finding.pattern, finding.description),
         type="investigate",
         severity=finding.severity,
         title=f"Tool errors increasing ({rate:.0%} of runs affected)",
@@ -233,7 +230,7 @@ def _handle_incomplete_pipeline(finding: Finding) -> Suggestion:
     missing = finding.evidence.get("missing_tools", {})
 
     return Suggestion(
-        id=_next_id(),
+        id=_make_id(finding.pattern, finding.description),
         type="prompt_fix",
         severity=finding.severity,
         title="Pipeline steps being skipped",
@@ -276,7 +273,7 @@ def _handle_code_finding(finding: Finding) -> Suggestion:
     }
 
     return Suggestion(
-        id=_next_id(),
+        id=_make_id(finding.pattern, finding.description),
         type=type_map.get(finding.pattern, "investigate"),
         severity=finding.severity,
         title=f"[Code] {finding.description[:80]}",

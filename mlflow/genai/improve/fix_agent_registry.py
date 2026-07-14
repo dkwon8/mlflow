@@ -73,6 +73,6 @@ def get_agent(name: str) -> CodeAgent:
         available = ", ".join(_AGENT_REGISTRY.keys()) or "none"
         raise ValueError(
             f"Unknown code agent '{name}'. Available: {available}. "
-            f"Register one with mlflow.genai.improve.code_agent.register_agent()."
+            f"Register one with mlflow.genai.improve.fix_agent_registry.register_agent()."
         )
     return _AGENT_REGISTRY[name]()

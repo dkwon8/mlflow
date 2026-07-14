@@ -5023,6 +5023,8 @@ def _invoke_improve_analysis_handler():
             "trace_count": [_assert_intlike],
             "mode": [_assert_string],
             "model": [_assert_string],
+            "repo_url": [_assert_string],
+            "branch": [_assert_string],
         }
     )
 
@@ -5035,8 +5037,8 @@ def _invoke_improve_analysis_handler():
     experiment = client.get_experiment(experiment_id)
     exp_tags = experiment.tags or {}
 
-    repo_url = exp_tags.get("mlflow.improve.github_repo")
-    branch = exp_tags.get("mlflow.improve.github_branch", "main")
+    repo_url = request_json.get("repo_url") or exp_tags.get("mlflow.improve.github_repo")
+    branch = request_json.get("branch") or exp_tags.get("mlflow.improve.github_branch", "main")
 
     result = analyze(
         experiment_name=experiment.name,
@@ -5068,14 +5070,14 @@ def _invoke_improve_fix_handler():
     Reads the experiment's GitHub repo connection tags and uses the
     configured code agent to clone the repo and create a PR.
     """
-    from mlflow.genai.improve.code_agent import FixRequest, get_agent
+    from mlflow.genai.improve.fix_agent_registry import FixRequest, get_agent
     from mlflow.utils.mlflow_tags import (
         MLFLOW_IMPROVE_CODE_AGENT,
         MLFLOW_IMPROVE_GITHUB_BRANCH,
         MLFLOW_IMPROVE_GITHUB_REPO,
     )
 
-    import mlflow.genai.improve.agents  # noqa: F401
+    import mlflow.genai.improve.fix_agents  # noqa: F401
 
     _validate_content_type(request, ["application/json"])
 
@@ -5129,6 +5131,7 @@ def _invoke_improve_fix_handler():
             "issue_id": issue_id,
             "title": suggestion.get("title", ""),
             "pr_url": result.pr_url,
+            "repo_url": repo_url,
         })
         client.set_experiment_tag(experiment_id, "mlflow.improve.resolved_fixes", _json.dumps(resolved))
 
