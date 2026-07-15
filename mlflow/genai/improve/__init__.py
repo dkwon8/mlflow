@@ -173,12 +173,20 @@ def analyze(
     for p in parsed:
         if p["error_details"]:
             first_error = p["error_details"][0]
+            timestamp = None
+            if p.get("start_ns") and p["start_ns"] > 0:
+                from datetime import datetime, timezone
+                timestamp = datetime.fromtimestamp(
+                    p["start_ns"] / 1e9, tz=timezone.utc
+                ).isoformat()
+
             alerts.append({
                 "trace_id": p["trace_id"],
                 "error_message": first_error["error_message"] or "Unknown error",
                 "user_query": p["user_query"] or "",
                 "failing_span": first_error["span_name"],
                 "severity": "high",
+                "timestamp": timestamp,
             })
 
     return {

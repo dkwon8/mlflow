@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 _logger = logging.getLogger(__name__)
 
-_DEFAULT_INTERVAL_MINUTES = 5
+_DEFAULT_INTERVAL_MINUTES = 1
 
 
 def run_improve_monitoring_scheduler() -> None:

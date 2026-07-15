@@ -37,6 +37,7 @@ interface Alert {
   user_query: string;
   failing_span: string;
   severity: string;
+  timestamp?: string;
 }
 
 interface ResolvedFix {
@@ -127,7 +128,7 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
         body: JSON.stringify({
           experiment_id: experimentId,
           trace_count: 20,
-          mode: 'auto',
+          mode: 'traces_only',
         }),
       });
       if (!response.ok) throw new Error(`Analysis failed: ${response.statusText}`);
@@ -165,6 +166,20 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
         const result = await response.json();
         if (result.success && result.pr_url) {
           window.open(result.pr_url, '_blank');
+          setAnalysisResult((prev) => {
+            if (!prev) return prev;
+            const newResolved: ResolvedFix = {
+              issue_id: fixId,
+              title: suggestion?.title || (alert ? `Runtime error in ${alert.failing_span}` : fixId),
+              pr_url: result.pr_url,
+              repo_url: githubRepo || undefined,
+            };
+            return {
+              ...prev,
+              resolved_fixes: [...(prev.resolved_fixes || []), newResolved],
+              alerts: alert ? prev.alerts.filter((a) => a.trace_id !== alert.trace_id) : prev.alerts,
+            };
+          });
         } else if (result.error) {
           setError(`Fix failed: ${result.error}`);
         }
@@ -174,7 +189,7 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
         setIsFixing(null);
       }
     },
-    [experimentId, analysisResult],
+    [experimentId, analysisResult, githubRepo],
   );
 
   const saveGithubRepo = useCallback(async () => {
@@ -200,7 +215,6 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
 
   const summary = analysisResult?.summary;
   const alerts = analysisResult?.alerts || [];
-  const codeFindings = analysisResult?.code_findings || [];
   const allResolvedFixes = analysisResult?.resolved_fixes || [];
   const resolvedFixes = allResolvedFixes.filter((r) => !r.repo_url || r.repo_url === githubRepo);
   const resolvedTitles = new Set(resolvedFixes.map((r) => r.title));
@@ -218,7 +232,7 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
           </Typography.Title>
         </div>
         <Button componentId="mlflow.improve.run-analysis" type="primary" loading={isAnalyzing} onClick={runAnalysis}>
-          <FormattedMessage defaultMessage="Run Analysis" description="Button to run improve analysis" />
+          <FormattedMessage defaultMessage="Refresh" description="Button to refresh improve analysis" />
         </Button>
       </div>
 
@@ -304,129 +318,32 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
               </Card>
             ))}
           </div>
-          {/* Analysis mode indicator */}
-          {summary.repo_analyzed && (
-            <div css={{ marginBottom: theme.spacing.lg }}>
-              <Tag componentId="mlflow.improve.mode-tag" color="teal">
-                Code Analysis: {summary.code_findings_count ?? 0} issues found
-              </Tag>
-            </div>
-          )}
         </>
       )}
 
-      {/* Tabs: Self-Optimization | Self-Healing | Code Findings */}
+      {/* Tabs: Issues | Resolved */}
       {analysisResult && (
-        <Tabs.Root componentId="mlflow.improve.tabs" defaultValue="optimization" valueHasNoPii>
+        <Tabs.Root componentId="mlflow.improve.tabs" defaultValue="issues" valueHasNoPii>
           <Tabs.List>
-            <Tabs.Trigger value="optimization">
-              Self-Optimization ({activeSuggestions.length})
+            <Tabs.Trigger value="issues">
+              Issues ({activeSuggestions.length + alerts.length})
             </Tabs.Trigger>
-            <Tabs.Trigger value="healing">
-              Self-Healing ({alerts.length})
+            <Tabs.Trigger value="resolved">
+              Resolved ({resolvedFixes.length})
             </Tabs.Trigger>
-            {codeFindings.length > 0 && (
-              <Tabs.Trigger value="code">
-                Code Analysis ({codeFindings.length})
-              </Tabs.Trigger>
-            )}
           </Tabs.List>
 
-          {/* Self-Optimization Tab */}
-          <Tabs.Content value="optimization">
+          {/* Issues Tab — errors + optimization suggestions unified */}
+          <Tabs.Content value="issues">
             <div css={{ paddingTop: theme.spacing.md }}>
-              {activeSuggestions.length > 0 ? (
-                <div css={{ marginBottom: theme.spacing.lg }}>
-                  <Typography.Title level={4} css={{ marginBottom: theme.spacing.sm }}>
-                    Active Suggestions ({activeSuggestions.length})
-                  </Typography.Title>
-                  {activeSuggestions.map((s) => (
-                    <Card componentId="mlflow.improve.suggestion-card" key={s.id} css={{ marginBottom: theme.spacing.sm }}>
-                      <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: theme.spacing.xs }}>
-                        <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center' }}>
-                          <Tag componentId="mlflow.improve.sev-tag" color={SEVERITY_COLORS[s.severity] || 'charcoal'}>{s.severity}</Tag>
-                          <Tag componentId="mlflow.improve.type-tag" color="charcoal">{TYPE_LABELS[s.type] || s.type}</Tag>
-                          <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm }}>
-                            {Math.round(s.confidence * 100)}% confidence
-                          </Typography.Text>
-                        </div>
-                        {repoSaved && (
-                          <Button
-                            componentId="mlflow.improve.fix-suggestion"
-                            type="primary"
-                            loading={isFixing === s.id}
-                            onClick={() => triggerFix(s, null)}
-                            css={{ flexShrink: 0 }}
-                          >
-                            Fix it
-                          </Button>
-                        )}
-                      </div>
-                      <Typography.Title level={4} css={{ marginTop: theme.spacing.xs }}>{s.title}</Typography.Title>
-                      <Typography.Text color="secondary" css={{ display: 'block', marginTop: 2 }}>{s.description}</Typography.Text>
-                      <div css={{ marginTop: theme.spacing.sm, padding: theme.spacing.sm, backgroundColor: theme.colors.backgroundSecondary, borderRadius: 4 }}>
-                        <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block' }}>
-                          Recommended action
-                        </Typography.Text>
-                        <Typography.Text css={{ display: 'block', marginTop: 4 }}>{s.action}</Typography.Text>
-                      </div>
-                    </Card>
-                  ))}
-                </div>
-              ) : (
-                <Card componentId="mlflow.improve.no-suggestions">
-                  <div css={{ textAlign: 'center', padding: theme.spacing.lg }}>
-                    <Typography.Text color="secondary">
-                      No active optimization suggestions. Your agent is performing well.
-                    </Typography.Text>
-                  </div>
-                </Card>
-              )}
-
-              {/* Resolved fixes */}
-              {resolvedFixes.length > 0 && (
-                <div css={{ marginTop: theme.spacing.lg }}>
-                  <Typography.Title level={4} css={{ marginBottom: theme.spacing.sm }}>
-                    Resolved ({resolvedFixes.length})
-                  </Typography.Title>
-                  {resolvedFixes.map((r, i) => (
-                    <Card componentId="mlflow.improve.resolved-card" key={i} css={{ marginBottom: theme.spacing.sm, opacity: 0.7 }}>
-                      <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center' }}>
-                          <Tag componentId="mlflow.improve.resolved-tag" color="purple">Resolved</Tag>
-                          <Typography.Text>{r.title}</Typography.Text>
-                        </div>
-                        {r.pr_url && (
-                          <Button
-                            componentId="mlflow.improve.view-pr"
-                            onClick={() => window.open(r.pr_url, '_blank')}
-                          >
-                            View PR
-                          </Button>
-                        )}
-                      </div>
-                    </Card>
-                  ))}
-                </div>
-              )}
-
-            </div>
-          </Tabs.Content>
-
-          {/* Self-Healing Tab */}
-          <Tabs.Content value="healing">
-            <div css={{ paddingTop: theme.spacing.md }}>
-              {alerts.length > 0 ? (
+              {(activeSuggestions.length + alerts.length) > 0 ? (
                 <div css={{ display: 'grid', gridTemplateColumns: selectedAlert ? '1fr 1fr' : '1fr', gap: theme.spacing.md }}>
-                  {/* Alert list */}
                   <div>
-                    <Typography.Title level={4} css={{ marginBottom: theme.spacing.sm }}>
-                      Event Alerts ({alerts.length})
-                    </Typography.Title>
+                    {/* Error alerts */}
                     {alerts.map((alert, i) => (
                       <Card
                         componentId="mlflow.improve.alert-card"
-                        key={i}
+                        key={`alert-${i}`}
                         css={{
                           marginBottom: theme.spacing.sm,
                           borderLeft: `3px solid ${theme.colors.textValidationDanger}`,
@@ -440,7 +357,7 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
                             <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center', marginBottom: theme.spacing.xs }}>
                               <Tag componentId="mlflow.improve.alert-sev" color="coral">Error</Tag>
                               <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm }}>
-                                {alert.trace_id.substring(0, 20)}...
+                                {alert.timestamp ? new Date(alert.timestamp).toLocaleString() : alert.trace_id.substring(0, 20) + '...'}
                               </Typography.Text>
                             </div>
                             <Typography.Text bold css={{ display: 'block' }}>{alert.failing_span}</Typography.Text>
@@ -456,17 +373,50 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
                         </div>
                       </Card>
                     ))}
+
+                    {/* Optimization suggestions */}
+                    {activeSuggestions.map((s) => (
+                      <Card componentId="mlflow.improve.suggestion-card" key={s.id} css={{ marginBottom: theme.spacing.sm }}>
+                        <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: theme.spacing.xs }}>
+                          <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center' }}>
+                            <Tag componentId="mlflow.improve.sev-tag" color={SEVERITY_COLORS[s.severity] || 'charcoal'}>{s.severity}</Tag>
+                            <Tag componentId="mlflow.improve.type-tag" color="charcoal">{TYPE_LABELS[s.type] || s.type}</Tag>
+                            <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm }}>
+                              {Math.round(s.confidence * 100)}% confidence
+                            </Typography.Text>
+                          </div>
+                          {repoSaved && (
+                            <Button
+                              componentId="mlflow.improve.fix-suggestion"
+                              type="primary"
+                              loading={isFixing === s.id}
+                              onClick={() => triggerFix(s, null)}
+                              css={{ flexShrink: 0 }}
+                            >
+                              Fix it
+                            </Button>
+                          )}
+                        </div>
+                        <Typography.Title level={4} css={{ marginTop: theme.spacing.xs }}>{s.title}</Typography.Title>
+                        <Typography.Text color="secondary" css={{ display: 'block', marginTop: 2 }}>{s.description}</Typography.Text>
+                        <div css={{ marginTop: theme.spacing.sm, padding: theme.spacing.sm, backgroundColor: theme.colors.backgroundSecondary, borderRadius: 4 }}>
+                          <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block' }}>
+                            Recommended action
+                          </Typography.Text>
+                          <Typography.Text css={{ display: 'block', marginTop: 4 }}>{s.action}</Typography.Text>
+                        </div>
+                      </Card>
+                    ))}
                   </div>
 
                   {/* Alert detail panel */}
                   {selectedAlert && (
                     <div>
-                      <Typography.Title level={4} css={{ marginBottom: theme.spacing.sm }}>Alert Detail</Typography.Title>
+                      <Typography.Title level={4} css={{ marginBottom: theme.spacing.sm }}>Error Detail</Typography.Title>
 
-                      {/* Error detail */}
                       <Card componentId="mlflow.improve.alert-detail" css={{ marginBottom: theme.spacing.sm }}>
                         <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block', marginBottom: theme.spacing.xs }}>
-                          Error Detail
+                          Error Message
                         </Typography.Text>
                         <div css={{
                           backgroundColor: theme.colors.backgroundSecondary,
@@ -482,7 +432,6 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
                         </div>
                       </Card>
 
-                      {/* User query */}
                       {selectedAlert.user_query && (
                         <Card componentId="mlflow.improve.alert-query" css={{ marginBottom: theme.spacing.sm }}>
                           <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block', marginBottom: theme.spacing.xs }}>
@@ -492,16 +441,12 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
                         </Card>
                       )}
 
-                      {/* Linked agent */}
                       {repoSaved && (
                         <Card componentId="mlflow.improve.linked-agent" css={{ marginBottom: theme.spacing.sm }}>
                           <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block', marginBottom: theme.spacing.xs }}>
                             Linked Agent
                           </Typography.Text>
                           <Typography.Text bold css={{ display: 'block' }}>{githubRepo}</Typography.Text>
-                          <Typography.Text color="secondary" css={{ display: 'block', marginTop: 2 }}>
-                            Connected via mlflow.improve
-                          </Typography.Text>
                           <Button
                             componentId="mlflow.improve.view-repo-detail"
                             css={{ marginTop: theme.spacing.sm }}
@@ -512,7 +457,6 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
                         </Card>
                       )}
 
-                      {/* Trace reference */}
                       <Card componentId="mlflow.improve.trace-ref" css={{ marginBottom: theme.spacing.sm }}>
                         <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block', marginBottom: theme.spacing.xs }}>
                           Trace Reference
@@ -521,7 +465,6 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
                         <Typography.Text css={{ display: 'block', marginTop: 2 }}>Failing span: <code>{selectedAlert.failing_span}</code></Typography.Text>
                       </Card>
 
-                      {/* Fix action */}
                       {repoSaved && (
                         <Button
                           componentId="mlflow.improve.fix-alert"
@@ -538,10 +481,10 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
                   )}
                 </div>
               ) : (
-                <Card componentId="mlflow.improve.no-alerts">
+                <Card componentId="mlflow.improve.no-issues">
                   <div css={{ textAlign: 'center', padding: theme.spacing.lg }}>
                     <Typography.Text color="secondary">
-                      No error alerts detected. All traces completed successfully.
+                      No issues detected. Your agent is performing well.
                     </Typography.Text>
                   </div>
                 </Card>
@@ -549,51 +492,42 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
             </div>
           </Tabs.Content>
 
-          {/* Code Analysis Tab */}
-          {codeFindings.length > 0 && (
-            <Tabs.Content value="code">
-              <div css={{ paddingTop: theme.spacing.md }}>
-                <Typography.Title level={4} css={{ marginBottom: theme.spacing.sm }}>
-                  Code Issues ({codeFindings.length})
-                </Typography.Title>
-                {codeFindings.map((cf, i) => (
-                  <Card componentId="mlflow.improve.code-finding-card" key={i} css={{ marginBottom: theme.spacing.sm }}>
-                    <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center', marginBottom: theme.spacing.xs }}>
-                      <Tag componentId="mlflow.improve.code-sev" color={SEVERITY_COLORS[cf.severity] || 'charcoal'}>{cf.severity}</Tag>
-                      <Tag componentId="mlflow.improve.code-pattern" color="charcoal">{cf.pattern.replace(/_/g, ' ')}</Tag>
-                      <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm }}>
-                        {Math.round(cf.confidence * 100)}% confidence
-                      </Typography.Text>
-                    </div>
-                    <Typography.Title level={4} css={{ marginTop: theme.spacing.xs }}>{cf.description}</Typography.Title>
-                    {cf.file_path && (
-                      <Typography.Text color="secondary" css={{ display: 'block', marginTop: 2, fontFamily: 'monospace', fontSize: 12 }}>
-                        {cf.file_path}
-                      </Typography.Text>
-                    )}
-                    {cf.root_cause && (
-                      <div css={{ marginTop: theme.spacing.sm }}>
-                        <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block' }}>
-                          Root Cause
-                        </Typography.Text>
-                        <Typography.Text css={{ display: 'block', marginTop: 2 }}>{cf.root_cause}</Typography.Text>
-                      </div>
-                    )}
-                    {cf.suggested_fix && (
-                      <div css={{ marginTop: theme.spacing.sm, padding: theme.spacing.sm, backgroundColor: theme.colors.backgroundSecondary, borderRadius: 4 }}>
-                        <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block' }}>
-                          Suggested Fix
-                        </Typography.Text>
-                        <div css={{ marginTop: 4, fontFamily: 'monospace', fontSize: 12, whiteSpace: 'pre-wrap' }}>
-                          {cf.suggested_fix}
+          {/* Resolved Tab */}
+          <Tabs.Content value="resolved">
+            <div css={{ paddingTop: theme.spacing.md }}>
+              {resolvedFixes.length > 0 ? (
+                <>
+                  {resolvedFixes.map((r, i) => (
+                    <Card componentId="mlflow.improve.resolved-card" key={i} css={{ marginBottom: theme.spacing.sm }}>
+                      <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center' }}>
+                          <Tag componentId="mlflow.improve.resolved-tag" color="teal">Fixed</Tag>
+                          <Typography.Text>{r.title}</Typography.Text>
                         </div>
+                        {r.pr_url && (
+                          <Button
+                            componentId="mlflow.improve.view-pr"
+                            onClick={() => window.open(r.pr_url, '_blank')}
+                          >
+                            View PR
+                          </Button>
+                        )}
                       </div>
-                    )}
-                  </Card>
-                ))}
-              </div>
-            </Tabs.Content>
-          )}
+                    </Card>
+                  ))}
+                </>
+              ) : (
+                <Card componentId="mlflow.improve.no-resolved">
+                  <div css={{ textAlign: 'center', padding: theme.spacing.lg }}>
+                    <Typography.Text color="secondary">
+                      No resolved issues yet. Use "Fix it" on suggestions to create fix PRs.
+                    </Typography.Text>
+                  </div>
+                </Card>
+              )}
+            </div>
+          </Tabs.Content>
+
         </Tabs.Root>
       )}
     </div>

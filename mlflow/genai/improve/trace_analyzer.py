@@ -143,6 +143,7 @@ def _parse_trace(trace_row: dict) -> dict:
     error_count = 0
     error_details = []
     user_query = ""
+    trace_start_ns = 0
 
     for span in spans:
         info = _extract_span_info(span)
@@ -154,6 +155,9 @@ def _parse_trace(trace_row: dict) -> dict:
                 "span_name": info["name"],
                 "error_message": info["error_message"],
             })
+        if info["parent_span_id"] in (None, "None", ""):
+            if info["start_ns"] > 0:
+                trace_start_ns = info["start_ns"]
         if info["parent_span_id"] in (None, "None", "") and info["inputs"]:
             try:
                 inputs = json.loads(info["inputs"]) if isinstance(info["inputs"], str) else info["inputs"]
@@ -194,6 +198,7 @@ def _parse_trace(trace_row: dict) -> dict:
         "execution_ms": execution_ms,
         "trace_size_bytes": trace_size,
         "assessments": assessments,
+        "start_ns": trace_start_ns,
     }
 
 

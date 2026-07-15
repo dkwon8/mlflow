@@ -5105,14 +5105,30 @@ def _invoke_improve_fix_handler():
 
     suggestion = request_json.get("suggestion", {})
     code_findings = request_json.get("code_findings", [])
+    trace_id = request_json.get("trace_id")
+    failing_span = request_json.get("failing_span")
+    error_message = request_json.get("error_message")
+
+    if suggestion:
+        issue_name = suggestion.get("title", issue_id)
+        issue_description = suggestion.get("description", "")
+        root_causes = [suggestion.get("action", "")]
+    else:
+        issue_name = f"Runtime error in {failing_span or 'agent'}"
+        issue_description = error_message or ""
+        root_causes = [f"Error occurred in span: {failing_span}"] if failing_span else []
+
     fix_request = FixRequest(
         issue_id=issue_id,
-        issue_name=suggestion.get("title", issue_id),
-        issue_description=suggestion.get("description", ""),
-        root_causes=[suggestion.get("action", "")],
+        issue_name=issue_name,
+        issue_description=issue_description,
+        root_causes=root_causes,
         repo_url=repo_url,
         branch=branch,
         experiment_id=experiment_id,
+        trace_id=trace_id,
+        failing_span=failing_span,
+        error_message=error_message,
         code_findings=code_findings,
     )
 
@@ -5129,7 +5145,7 @@ def _invoke_improve_fix_handler():
             resolved = []
         resolved.append({
             "issue_id": issue_id,
-            "title": suggestion.get("title", ""),
+            "title": issue_name,
             "pr_url": result.pr_url,
             "repo_url": repo_url,
         })

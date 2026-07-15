@@ -126,7 +126,7 @@ class ClaudeCodeAgent(CodeAgent):
             cwd=repo_dir,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=600,
         )
 
     def _create_branch(self, repo_dir: Path, branch_name: str):
@@ -144,8 +144,16 @@ class ClaudeCodeAgent(CodeAgent):
             f"Fix the following issue detected by MLflow's improve system.\n",
             f"Issue: {request.issue_name}\n",
             f"Description: {request.issue_description}\n",
-            f"Root causes:\n{root_causes}\n",
         ]
+
+        if root_causes.strip():
+            parts.append(f"Root causes:\n{root_causes}\n")
+
+        if request.error_message:
+            parts.append(f"Runtime error message:\n{request.error_message[:500]}\n")
+
+        if request.failing_span:
+            parts.append(f"Failing component: {request.failing_span}\n")
 
         if request.code_findings:
             parts.append("Code analysis findings:\n")
