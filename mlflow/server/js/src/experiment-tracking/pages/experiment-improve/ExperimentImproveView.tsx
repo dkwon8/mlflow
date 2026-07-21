@@ -422,8 +422,8 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
       {/* Auto-fix banner */}
       {autoFixOpenPRs.length > 0 && (
         <Card componentId="mlflow.improve.auto-fix-banner" css={{ marginBottom: theme.spacing.md, borderLeft: `3px solid ${theme.colors.textValidationSuccess}`, backgroundColor: 'rgba(34, 197, 94, 0.06)' }}>
-          <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div>
+          <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: theme.spacing.lg }}>
+            <div css={{ flexShrink: 0 }}>
               <Typography.Text bold css={{ display: 'block' }}>
                 Self-Healing auto-created {autoFixOpenPRs.length} fix PR{autoFixOpenPRs.length > 1 ? 's' : ''}
               </Typography.Text>
@@ -431,10 +431,10 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
                 Review and merge to apply.
               </Typography.Text>
             </div>
-            <div css={{ display: 'flex', gap: theme.spacing.xs }}>
-              {autoFixOpenPRs.map((pr) => (
+            <div css={{ display: 'flex', gap: theme.spacing.sm }}>
+              {[...autoFixOpenPRs].sort((a, b) => (a.pr_number ?? 0) - (b.pr_number ?? 0)).map((pr) => (
                 <Button key={pr.pr_url} componentId="mlflow.improve.auto-fix-pr" onClick={() => window.open(pr.pr_url, '_blank')}>
-                  View PR
+                  {pr.pr_number ? `View PR #${pr.pr_number}` : 'View PR'}
                 </Button>
               ))}
             </div>
@@ -445,12 +445,10 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
       {/* Health Dashboard */}
       {summary && summary.status === 'ok' && (
         <>
-          <div css={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: theme.spacing.md, marginBottom: theme.spacing.md }}>
+          <div css={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: theme.spacing.md, marginBottom: theme.spacing.md }}>
             {[
               { label: 'Total Traces', value: summary.total_traces ?? summary.traces_analyzed ?? 0, color: theme.colors.textPrimary, bg: 'rgba(130, 140, 160, 0.08)' },
               { label: 'Healthy', value: summary.healthy_count ?? 0, color: theme.colors.textValidationSuccess, bg: 'rgba(34, 197, 94, 0.10)' },
-              { label: 'With Issues', value: healCount + improveCount, color: theme.colors.textValidationWarning, bg: 'rgba(234, 179, 8, 0.10)' },
-              { label: 'Errors', value: healCount, color: theme.colors.textValidationDanger, bg: 'rgba(239, 68, 68, 0.10)' },
               { label: 'Avg Latency', value: summary.avg_latency_ms ? `${(summary.avg_latency_ms / 1000).toFixed(1)}s` : '—', color: theme.colors.textPrimary, bg: 'rgba(99, 140, 210, 0.08)' },
             ].map((card) => (
               <Card componentId="mlflow.improve.health-card" key={card.label} css={{ textAlign: 'center', padding: theme.spacing.md, minWidth: 0, overflow: 'hidden', backgroundColor: card.bg, border: `1px solid ${card.bg}` }}>
