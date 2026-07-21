@@ -126,7 +126,7 @@ class ClaudeCodeAgent(CodeAgent):
             cwd=repo_dir,
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=300,
         )
 
     def _create_branch(self, repo_dir: Path, branch_name: str):

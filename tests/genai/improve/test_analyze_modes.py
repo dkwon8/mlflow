@@ -15,7 +15,7 @@ def _mock_experiment():
     return exp
 
 
-def _mock_traces_df(n=5):
+def _mock_traces_df(n=12):
     import pandas as pd
 
     rows = []
@@ -38,7 +38,7 @@ def test_traces_only(mock_exp, mock_search, mock_select, mock_analyze_code, mock
     from mlflow.genai.improve import analyze
 
     mock_exp.return_value = _mock_experiment()
-    mock_search.return_value = _mock_traces_df(5)
+    mock_search.return_value = _mock_traces_df(12)
 
     result = analyze("test-exp", mode="traces_only")
 
@@ -83,7 +83,7 @@ def test_both_mode(mock_exp, mock_search, mock_select, mock_analyze_code, mock_c
     from mlflow.genai.improve import analyze
 
     mock_exp.return_value = _mock_experiment()
-    mock_search.return_value = _mock_traces_df(5)
+    mock_search.return_value = _mock_traces_df(12)
     mock_clone.return_value = "/tmp/repo"
     mock_select.return_value = [("main.py", "code")]
     mock_analyze_code.return_value = [
@@ -105,7 +105,7 @@ def test_auto_with_traces(mock_exp, mock_search, mock_select, mock_analyze_code,
     from mlflow.genai.improve import analyze
 
     mock_exp.return_value = _mock_experiment()
-    mock_search.return_value = _mock_traces_df(5)
+    mock_search.return_value = _mock_traces_df(12)
     mock_clone.return_value = "/tmp/repo"
     mock_select.return_value = []
     mock_analyze_code.return_value = []
@@ -113,7 +113,7 @@ def test_auto_with_traces(mock_exp, mock_search, mock_select, mock_analyze_code,
     result = analyze("test-exp", mode="auto", repo_url="owner/repo")
 
     assert result["summary"]["status"] == "ok"
-    assert result["summary"]["traces_analyzed"] == 5
+    assert result["summary"]["traces_analyzed"] == 12
 
 
 @mock.patch("mlflow.search_traces")

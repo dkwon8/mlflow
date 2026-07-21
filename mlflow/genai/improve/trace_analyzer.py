@@ -17,12 +17,21 @@ from dataclasses import dataclass, field
 from statistics import mean as _mean, pstdev as _pstdev
 
 
+HEAL_PATTERNS = {"error_spike"}
+IMPROVE_PATTERNS = {
+    "context_bloat", "context_growth", "tool_redundancy",
+    "score_degradation", "score_declining",
+    "slow_execution", "execution_slowdown", "incomplete_pipeline",
+}
+
+
 @dataclass
 class Finding:
     """A detected issue from trace analysis."""
     pattern: str
     severity: str  # "low", "medium", "high"
     description: str
+    category: str = "improve"  # "heal" or "improve"
     evidence: dict = field(default_factory=dict)
 
 
@@ -202,12 +211,13 @@ def _parse_trace(trace_row: dict) -> dict:
     }
 
 
-def analyze_traces(traces_data: list[dict]) -> list[Finding]:
+def analyze_traces(traces_data: list[dict], mode: str | None = None) -> list[Finding]:
     """Run all detection patterns against a set of traces.
 
     Args:
         traces_data: List of raw trace dicts from mlflow.search_traces().
             Each dict should have keys: spans, execution_duration, assessments.
+        mode: Optional "heal" or "improve" to filter findings by category.
 
     Returns:
         List of Finding objects describing detected issues.
@@ -224,6 +234,11 @@ def analyze_traces(traces_data: list[dict]) -> list[Finding]:
     findings.extend(_detect_slowdown(parsed))
     findings.extend(_detect_error_spike(parsed))
     findings.extend(_detect_incomplete_pipeline(parsed))
+
+    if mode:
+        target = HEAL_PATTERNS if mode == "heal" else IMPROVE_PATTERNS
+        findings = [f for f in findings if f.pattern in target]
+
     return findings
 
 
@@ -481,6 +496,7 @@ def _detect_error_spike(traces: list[dict]) -> list[Finding]:
                 findings.append(Finding(
                     pattern="error_spike",
                     severity=severity,
+                    category="heal",
                     description=f"Error spike — {traces_with_errors}/{len(traces)} traces have errors ({error_rate:.0%}, {bl['z_score']:.1f}σ above baseline {bl['baseline_mean']:.0%}).",
                     evidence={
                         "traces_with_errors": traces_with_errors,
@@ -499,6 +515,7 @@ def _detect_error_spike(traces: list[dict]) -> list[Finding]:
             findings.append(Finding(
                 pattern="error_spike",
                 severity=severity,
+                category="heal",
                 description=f"New errors appearing — {recent_errors}/3 recent traces have errors vs zero in baseline.",
                 evidence={
                     "traces_with_errors": traces_with_errors,
@@ -512,6 +529,7 @@ def _detect_error_spike(traces: list[dict]) -> list[Finding]:
         findings.append(Finding(
             pattern="error_spike",
             severity="high" if error_rate > 0.5 else "medium",
+            category="heal",
             description=f"Tool errors in {traces_with_errors}/{len(traces)} traces ({error_rate:.0%}, limited data).",
             evidence={
                 "traces_with_errors": traces_with_errors,

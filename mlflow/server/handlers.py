@@ -5161,6 +5161,178 @@ def _invoke_improve_fix_handler():
 
 @catch_mlflow_exception
 @_disable_if_artifacts_only
+def _invoke_improve_feedback_handler():
+    """
+    Send follow-up feedback on an existing improve PR branch.
+
+    The code agent makes additional changes on the same branch based on
+    the user's feedback, commits, and pushes.
+    """
+    from mlflow.genai.improve.fix_agent_registry import FixRequest, get_agent
+    from mlflow.utils.mlflow_tags import (
+        MLFLOW_IMPROVE_CODE_AGENT,
+        MLFLOW_IMPROVE_GITHUB_BRANCH,
+        MLFLOW_IMPROVE_GITHUB_REPO,
+    )
+
+    import mlflow.genai.improve.fix_agents  # noqa: F401
+
+    _validate_content_type(request, ["application/json"])
+
+    request_json = _get_validated_flask_request_json(
+        schema={
+            "experiment_id": [_assert_required, _assert_string],
+            "branch_name": [_assert_required, _assert_string],
+            "feedback": [_assert_required, _assert_string],
+        }
+    )
+
+    experiment_id = request_json.get("experiment_id")
+    branch_name = request_json.get("branch_name")
+    feedback = request_json.get("feedback")
+
+    client = MlflowClient()
+    experiment = client.get_experiment(experiment_id)
+    exp_tags = experiment.tags or {}
+
+    repo_url = exp_tags.get(MLFLOW_IMPROVE_GITHUB_REPO)
+    if not repo_url:
+        raise MlflowException(
+            f"No GitHub repo configured. Set the '{MLFLOW_IMPROVE_GITHUB_REPO}' experiment tag."
+        )
+
+    agent_name = exp_tags.get(MLFLOW_IMPROVE_CODE_AGENT, "claude-code")
+
+    fix_request = FixRequest(
+        issue_id=f"feedback-{branch_name}",
+        issue_name=f"Follow-up feedback on {branch_name}",
+        issue_description=feedback,
+        root_causes=[feedback],
+        repo_url=repo_url,
+        branch=branch_name,
+        experiment_id=experiment_id,
+    )
+
+    agent = get_agent(agent_name)
+    result = agent.create_fix(fix_request)
+
+    return jsonify({
+        "success": result.success,
+        "pr_url": result.pr_url,
+        "error": result.error,
+        "changes_summary": result.changes_summary,
+    })
+
+
+def _fetch_github_pr_status(repo_url):
+    import json as _json
+    import shutil
+    import subprocess
+
+    from mlflow.genai.improve.utils import normalize_repo_url
+
+    gh_cmd = shutil.which("gh")
+    if not gh_cmd:
+        return []
+
+    nwo = normalize_repo_url(repo_url)
+    if not nwo:
+        return []
+
+    try:
+        result = subprocess.run(
+            [
+                gh_cmd, "pr", "list",
+                "--repo", nwo,
+                "--search", "head:improve/fix-",
+                "--state", "all",
+                "--json", "title,url,number,state,headRefName",
+                "--limit", "50",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            return []
+
+        prs = _json.loads(result.stdout)
+        return [
+            {
+                "title": pr.get("title", "").replace("[MLflow Improve] Fix: ", ""),
+                "pr_url": pr.get("url", ""),
+                "pr_number": pr.get("number"),
+                "status": pr.get("state", "OPEN").lower(),
+                "branch": pr.get("headRefName", ""),
+            }
+            for pr in prs
+        ]
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        return []
+
+
+@catch_mlflow_exception
+@_disable_if_artifacts_only
+def _invoke_improve_pr_status_handler():
+    """Fetch PR status for MLflow Improve PRs from GitHub."""
+    import json as _json
+
+    _validate_content_type(request, ["application/json"])
+
+    request_json = _get_validated_flask_request_json(
+        schema={
+            "experiment_id": [_assert_required, _assert_string],
+        }
+    )
+
+    experiment_id = request_json.get("experiment_id")
+    client = MlflowClient()
+    experiment = client.get_experiment(experiment_id)
+    exp_tags = experiment.tags or {}
+
+    repo_url = exp_tags.get("mlflow.improve.github_repo")
+    if not repo_url:
+        return jsonify({"resolved_fixes": []})
+
+    resolved_raw = exp_tags.get("mlflow.improve.resolved_fixes", "[]")
+    try:
+        tag_resolved = _json.loads(resolved_raw)
+    except (ValueError, TypeError):
+        tag_resolved = []
+
+    github_prs = _fetch_github_pr_status(repo_url)
+
+    seen_urls = set()
+    merged = []
+
+    for pr in github_prs:
+        url = pr["pr_url"]
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            tag_match = next((t for t in tag_resolved if t.get("pr_url") == url), None)
+            merged.append({
+                "issue_id": tag_match.get("issue_id", "") if tag_match else "",
+                "title": pr["title"],
+                "pr_url": url,
+                "pr_number": pr.get("pr_number"),
+                "repo_url": repo_url,
+                "status": pr["status"],
+                "branch": pr.get("branch", ""),
+            })
+
+    for tag_fix in tag_resolved:
+        url = tag_fix.get("pr_url", "")
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            merged.append({**tag_fix, "status": "unknown"})
+        elif not url:
+            merged.append({**tag_fix, "status": "unknown"})
+
+    return jsonify({"resolved_fixes": merged})
+
+
+@catch_mlflow_exception
+@_disable_if_artifacts_only
 def _invoke_genai_evaluate_handler():
     """
     Run mlflow.genai.evaluate(...) against the chosen traces + scorers as an
@@ -7020,6 +7192,16 @@ def get_improve_endpoints():
         (
             _get_ajax_path("/mlflow/improve/fix", version=3),
             _invoke_improve_fix_handler,
+            ["POST"],
+        ),
+        (
+            _get_ajax_path("/mlflow/improve/feedback", version=3),
+            _invoke_improve_feedback_handler,
+            ["POST"],
+        ),
+        (
+            _get_ajax_path("/mlflow/improve/pr-status", version=3),
+            _invoke_improve_pr_status_handler,
             ["POST"],
         ),
     ]

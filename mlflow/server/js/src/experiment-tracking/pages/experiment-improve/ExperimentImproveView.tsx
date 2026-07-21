@@ -8,6 +8,7 @@ interface Suggestion {
   id: string;
   type: string;
   severity: string;
+  category: string;
   title: string;
   description: string;
   action: string;
@@ -18,6 +19,7 @@ interface Suggestion {
 interface Finding {
   pattern: string;
   severity: string;
+  category: string;
   description: string;
 }
 
@@ -44,7 +46,10 @@ interface ResolvedFix {
   issue_id: string;
   title: string;
   pr_url: string;
+  pr_number?: number;
   repo_url?: string;
+  status?: 'merged' | 'open' | 'closed' | 'unknown';
+  branch?: string;
 }
 
 interface AnalysisResult {
@@ -60,6 +65,8 @@ interface AnalysisResult {
     error_count?: number;
     avg_latency_ms?: number;
     traces_analyzed?: number;
+    traces_available?: number;
+    traces_required?: number;
     findings_count?: number;
     code_findings_count?: number;
     suggestions_count?: number;
@@ -69,6 +76,8 @@ interface AnalysisResult {
     repo_analyzed?: boolean;
   };
 }
+
+const MIN_TRACES = 10;
 
 const SEVERITY_COLORS: Record<string, TagColors> = {
   high: 'coral',
@@ -93,6 +102,17 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
   const [repoSaved, setRepoSaved] = useState(false);
   const [repoSource, setRepoSource] = useState<'auto' | 'manual' | null>(null);
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
+  const [traceCount, setTraceCount] = useState<number | null>(null);
+
+  const [lastFixBranch, setLastFixBranch] = useState<string | null>(null);
+  const [lastFixPrUrl, setLastFixPrUrl] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState('');
+  const [isSendingFeedback, setIsSendingFeedback] = useState(false);
+  const [prStatusFixes, setPrStatusFixes] = useState<ResolvedFix[]>([]);
+  const [isLoadingPrStatus, setIsLoadingPrStatus] = useState(false);
+
+  const hasEnoughTraces = traceCount !== null && traceCount >= MIN_TRACES;
+  const canAnalyze = repoSaved && hasEnoughTraces;
 
   useEffect(() => {
     const loadExperimentTags = async () => {
@@ -112,15 +132,53 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
           }
         }
       } catch {
-        // Non-critical — tags will just start empty
+        // Non-critical
       }
     };
+
+    const loadTraceCount = async () => {
+      try {
+        const response = await fetch(
+          getAjaxUrl(`ajax-api/2.0/mlflow/traces?experiment_ids=${experimentId}&max_results=100`),
+        );
+        if (response.ok) {
+          const data = await response.json();
+          setTraceCount(data.traces?.length ?? 0);
+        }
+      } catch {
+        setTraceCount(0);
+      }
+    };
+
+    const loadPrStatus = async () => {
+      setIsLoadingPrStatus(true);
+      try {
+        const response = await fetch(getAjaxUrl('ajax-api/3.0/mlflow/improve/pr-status'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ experiment_id: experimentId }),
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setPrStatusFixes(data.resolved_fixes || []);
+        }
+      } catch {
+        // Non-critical
+      } finally {
+        setIsLoadingPrStatus(false);
+      }
+    };
+
     loadExperimentTags();
+    loadTraceCount();
+    loadPrStatus();
   }, [experimentId]);
 
   const runAnalysis = useCallback(async () => {
     setIsAnalyzing(true);
     setError(null);
+    setLastFixBranch(null);
+    setLastFixPrUrl(null);
     try {
       const response = await fetch(getAjaxUrl('ajax-api/3.0/mlflow/improve/invoke'), {
         method: 'POST',
@@ -166,6 +224,9 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
         const result = await response.json();
         if (result.success && result.pr_url) {
           window.open(result.pr_url, '_blank');
+          setLastFixPrUrl(result.pr_url);
+          const branchMatch = result.pr_url.match(/improve\/[^/]+/);
+          if (branchMatch) setLastFixBranch(branchMatch[0]);
           setAnalysisResult((prev) => {
             if (!prev) return prev;
             const newResolved: ResolvedFix = {
@@ -177,6 +238,7 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
             return {
               ...prev,
               resolved_fixes: [...(prev.resolved_fixes || []), newResolved],
+              suggestions: suggestion ? prev.suggestions.filter((s) => s.id !== suggestion.id) : prev.suggestions,
               alerts: alert ? prev.alerts.filter((a) => a.trace_id !== alert.trace_id) : prev.alerts,
             };
           });
@@ -191,6 +253,34 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
     },
     [experimentId, analysisResult, githubRepo],
   );
+
+  const sendFeedback = useCallback(async () => {
+    if (!feedback.trim() || !lastFixBranch) return;
+    setIsSendingFeedback(true);
+    setError(null);
+    try {
+      const response = await fetch(getAjaxUrl('ajax-api/3.0/mlflow/improve/feedback'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          experiment_id: experimentId,
+          branch_name: lastFixBranch,
+          feedback: feedback.trim(),
+        }),
+      });
+      if (!response.ok) throw new Error(`Feedback failed: ${response.statusText}`);
+      const result = await response.json();
+      if (result.success) {
+        setFeedback('');
+      } else if (result.error) {
+        setError(`Feedback failed: ${result.error}`);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Feedback failed');
+    } finally {
+      setIsSendingFeedback(false);
+    }
+  }, [experimentId, lastFixBranch, feedback]);
 
   const saveGithubRepo = useCallback(async () => {
     try {
@@ -215,25 +305,46 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
 
   const summary = analysisResult?.summary;
   const alerts = analysisResult?.alerts || [];
-  const allResolvedFixes = analysisResult?.resolved_fixes || [];
+  const tagResolvedFixes = analysisResult?.resolved_fixes || [];
+  const allResolvedFixes = (() => {
+    const seen = new Set<string>();
+    const merged: ResolvedFix[] = [];
+    for (const fix of prStatusFixes) {
+      const key = fix.pr_url || fix.issue_id;
+      if (!seen.has(key)) { seen.add(key); merged.push(fix); }
+    }
+    for (const fix of tagResolvedFixes) {
+      const key = fix.pr_url || fix.issue_id;
+      if (!seen.has(key)) { seen.add(key); merged.push({ ...fix, status: fix.status || 'merged' }); }
+    }
+    return merged;
+  })();
   const resolvedFixes = allResolvedFixes.filter((r) => !r.repo_url || r.repo_url === githubRepo);
   const resolvedTitles = new Set(resolvedFixes.map((r) => r.title));
 
   const activeSuggestions = analysisResult?.suggestions.filter((s) => !resolvedTitles.has(s.title)) || [];
+  const uniqueSuggestions = [...new Map(activeSuggestions.map((s) => [s.title.replace(/\s*\(.*$/, ''), s])).values()];
+  const healSuggestions = uniqueSuggestions.filter((s) => s.category === 'heal');
+  const improveSuggestions = uniqueSuggestions.filter((s) => s.category === 'improve');
+
+  const healCount = healSuggestions.length + alerts.length;
+  const improveCount = improveSuggestions.length;
 
   return (
     <div css={{ padding: theme.spacing.lg, overflowY: 'auto', height: '100%' }}>
       {/* Header */}
-      <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: theme.spacing.lg }}>
+      <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: theme.spacing.md }}>
         <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
           <SparkleIcon />
           <Typography.Title level={3} css={{ margin: 0 }}>
             <FormattedMessage defaultMessage="Improve" description="Title for the improve page" />
           </Typography.Title>
         </div>
-        <Button componentId="mlflow.improve.run-analysis" type="primary" loading={isAnalyzing} onClick={runAnalysis}>
-          <FormattedMessage defaultMessage="Refresh" description="Button to refresh improve analysis" />
-        </Button>
+        {canAnalyze && (
+          <Button componentId="mlflow.improve.run-analysis" type="primary" loading={isAnalyzing} onClick={runAnalysis}>
+            <FormattedMessage defaultMessage="Analyze" description="Button to run improve analysis" />
+          </Button>
+        )}
       </div>
 
       {/* Error */}
@@ -244,23 +355,17 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
       )}
 
       {/* GitHub Connection */}
-      <Card componentId="mlflow.improve.github-card" css={{ marginBottom: theme.spacing.lg }}>
-        <Typography.Title level={4} css={{ marginBottom: theme.spacing.sm }}>
-          <FormattedMessage defaultMessage="GitHub Repository" description="GitHub connection section title" />
-        </Typography.Title>
-        <Typography.Text color="secondary" css={{ display: 'block', marginBottom: theme.spacing.sm }}>
-          <FormattedMessage
-            defaultMessage="Connect a GitHub repository to enable code analysis and automatic fix PRs."
-            description="GitHub connection description"
-          />
+      <Card componentId="mlflow.improve.github-card" css={{ marginBottom: theme.spacing.md }}>
+        <Typography.Text color="secondary" css={{ display: 'block', marginBottom: theme.spacing.sm, fontSize: theme.typography.fontSizeSm }}>
+          <FormattedMessage defaultMessage="GitHub Repository" description="GitHub connection label" />
         </Typography.Text>
-        <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'center' }}>
+        <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'center', flexWrap: 'wrap' }}>
           <Input
             componentId="mlflow.improve.github-input"
             placeholder="owner/repo-name"
             value={githubRepo}
             onChange={(e) => { setGithubRepo(e.target.value); setRepoSaved(false); setAnalysisResult(null); }}
-            css={{ flex: 1 }}
+            css={{ width: 280, flexShrink: 0 }}
           />
           <Button componentId="mlflow.improve.connect-repo" onClick={saveGithubRepo} disabled={!githubRepo || repoSaved}>
             {repoSaved ? 'Saved' : 'Connect'}
@@ -274,109 +379,202 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
             </Button>
           )}
           {repoSaved && repoSource === 'auto' && (
-            <Tag componentId="mlflow.improve.auto-detected" color="teal">
-              Auto-detected from traces
+            <Tag componentId="mlflow.improve.auto-detected" color="teal">Auto-detected</Tag>
+          )}
+          {repoSaved && traceCount !== null && (
+            <Tag componentId="mlflow.improve.trace-count" color="charcoal">
+              {traceCount} trace{traceCount !== 1 ? 's' : ''}
+              {!hasEnoughTraces && ` · Need ${MIN_TRACES}+`}
             </Tag>
           )}
         </div>
       </Card>
 
-      {/* Empty state */}
+      {/* Pre-analysis state */}
       {!analysisResult && !isAnalyzing && (
-        <Card componentId="mlflow.improve.empty-state">
-          <div css={{ textAlign: 'center', padding: theme.spacing.lg }}>
-            <SparkleIcon css={{ fontSize: 32, marginBottom: theme.spacing.sm, color: theme.colors.actionDisabledText }} />
+        <Card componentId="mlflow.improve.empty-state" css={{ width: '100%' }}>
+          <div css={{ textAlign: 'center', padding: `${theme.spacing.xl}px ${theme.spacing.lg}px` }}>
+            <SparkleIcon css={{ fontSize: 28, marginBottom: theme.spacing.sm, color: theme.colors.actionDisabledText }} />
             <Typography.Text color="secondary" css={{ display: 'block' }}>
-              {repoSaved ? (
-                "Click 'Run Analysis' to analyze your repository code and traces. Use 'Code Only' mode to analyze code without traces."
-              ) : (
-                "Connect a GitHub repository above, then click 'Run Analysis' to find issues in your code and traces."
-              )}
+              {!repoSaved
+                ? 'Connect a GitHub repository above to get started.'
+                : !hasEnoughTraces
+                  ? `This experiment needs at least ${MIN_TRACES} traces before analysis can run. Currently has ${traceCount ?? 0}.`
+                  : "Click 'Analyze' to scan this experiment's traces for issues and optimization opportunities."}
+            </Typography.Text>
+          </div>
+        </Card>
+      )}
+
+      {/* Insufficient traces from backend */}
+      {analysisResult?.summary?.status === 'insufficient_traces' && (
+        <Card componentId="mlflow.improve.insufficient-traces" css={{ marginBottom: theme.spacing.md, width: '100%' }}>
+          <div css={{ textAlign: 'center', padding: theme.spacing.lg }}>
+            <Typography.Text color="warning">
+              Not enough traces for analysis. Have {analysisResult.summary.traces_available}, need at least {analysisResult.summary.traces_required}. Run your agent more to generate traces.
             </Typography.Text>
           </div>
         </Card>
       )}
 
       {/* Health Dashboard */}
-      {summary && (
+      {summary && summary.status === 'ok' && (
         <>
-          <div css={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: theme.spacing.sm, marginBottom: theme.spacing.sm }}>
+          <div css={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: theme.spacing.md, marginBottom: theme.spacing.md }}>
             {[
-              { label: 'Total Traces', value: summary.total_traces ?? summary.traces_analyzed ?? 0, color: theme.colors.textPrimary },
-              { label: 'Healthy', value: summary.healthy_count ?? 0, color: theme.colors.textValidationSuccess },
-              { label: 'With Issues', value: summary.findings_count ?? 0, color: theme.colors.textValidationWarning },
-              { label: 'Errors', value: summary.error_count ?? 0, color: theme.colors.textValidationDanger },
-              { label: 'Avg Latency', value: summary.avg_latency_ms ? `${(summary.avg_latency_ms / 1000).toFixed(1)}s` : '—', color: theme.colors.textPrimary },
+              { label: 'Total Traces', value: summary.total_traces ?? summary.traces_analyzed ?? 0, color: theme.colors.textPrimary, bg: 'rgba(130, 140, 160, 0.08)' },
+              { label: 'Healthy', value: summary.healthy_count ?? 0, color: theme.colors.textValidationSuccess, bg: 'rgba(34, 197, 94, 0.10)' },
+              { label: 'With Issues', value: healCount + improveCount, color: theme.colors.textValidationWarning, bg: 'rgba(234, 179, 8, 0.10)' },
+              { label: 'Errors', value: healCount, color: theme.colors.textValidationDanger, bg: 'rgba(239, 68, 68, 0.10)' },
+              { label: 'Avg Latency', value: summary.avg_latency_ms ? `${(summary.avg_latency_ms / 1000).toFixed(1)}s` : '—', color: theme.colors.textPrimary, bg: 'rgba(99, 140, 210, 0.08)' },
             ].map((card) => (
-              <Card componentId="mlflow.improve.health-card" key={card.label} css={{ minHeight: 80 }}>
-                <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block' }}>
+              <Card componentId="mlflow.improve.health-card" key={card.label} css={{ textAlign: 'center', padding: theme.spacing.md, minWidth: 0, overflow: 'hidden', backgroundColor: card.bg, border: `1px solid ${card.bg}` }}>
+                <Typography.Text color="secondary" css={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block' }}>
                   {card.label}
                 </Typography.Text>
-                <Typography.Title level={3} css={{ marginTop: 4, marginBottom: 0, color: card.color }}>
+                <Typography.Title level={2} css={{ marginTop: theme.spacing.xs, marginBottom: 0, color: card.color }}>
                   {card.value}
                 </Typography.Title>
               </Card>
             ))}
           </div>
-        </>
-      )}
 
-      {/* Tabs: Issues | Resolved */}
-      {analysisResult && (
-        <Tabs.Root componentId="mlflow.improve.tabs" defaultValue="issues" valueHasNoPii>
-          <Tabs.List>
-            <Tabs.Trigger value="issues">
-              Issues ({activeSuggestions.length + alerts.length})
-            </Tabs.Trigger>
-            <Tabs.Trigger value="resolved">
-              Resolved ({resolvedFixes.length})
-            </Tabs.Trigger>
-          </Tabs.List>
+          <Tabs.Root componentId="mlflow.improve.sections" defaultValue="healing">
+            <Tabs.List>
+              <Tabs.Trigger value="healing">
+                Self-Healing
+                <Tag componentId="mlflow.improve.heal-count" color={healCount > 0 ? 'coral' : 'charcoal'} css={{ marginLeft: theme.spacing.xs }}>
+                  {healCount}
+                </Tag>
+              </Tabs.Trigger>
+              <Tabs.Trigger value="improvement">
+                Self-Improvement
+                <Tag componentId="mlflow.improve.improve-count" color={improveCount > 0 ? 'lemon' : 'charcoal'} css={{ marginLeft: theme.spacing.xs }}>
+                  {improveCount}
+                </Tag>
+              </Tabs.Trigger>
+              {(resolvedFixes.length > 0 || isLoadingPrStatus) && (
+                <Tabs.Trigger value="resolved">
+                  Resolved
+                  <Tag componentId="mlflow.improve.resolved-count" color="teal" css={{ marginLeft: theme.spacing.xs }}>
+                    {resolvedFixes.length}
+                  </Tag>
+                </Tabs.Trigger>
+              )}
+            </Tabs.List>
 
-          {/* Issues Tab — errors + optimization suggestions unified */}
-          <Tabs.Content value="issues">
-            <div css={{ paddingTop: theme.spacing.md }}>
-              {(activeSuggestions.length + alerts.length) > 0 ? (
-                <div css={{ display: 'grid', gridTemplateColumns: selectedAlert ? '1fr 1fr' : '1fr', gap: theme.spacing.md }}>
-                  <div>
-                    {/* Error alerts */}
-                    {alerts.map((alert, i) => (
-                      <Card
-                        componentId="mlflow.improve.alert-card"
-                        key={`alert-${i}`}
-                        css={{
-                          marginBottom: theme.spacing.sm,
-                          borderLeft: `3px solid ${theme.colors.textValidationDanger}`,
-                          cursor: 'pointer',
-                          backgroundColor: selectedAlert?.trace_id === alert.trace_id ? theme.colors.actionTertiaryBackgroundPress : undefined,
-                        }}
-                        onClick={() => setSelectedAlert(selectedAlert?.trace_id === alert.trace_id ? null : alert)}
-                      >
-                        <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                          <div css={{ flex: 1 }}>
-                            <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center', marginBottom: theme.spacing.xs }}>
+            {/* ── Self-Healing Tab ── */}
+            <Tabs.Content value="healing">
+              <div css={{ paddingTop: theme.spacing.md }}>
+                <Typography.Text color="secondary" css={{ display: 'block', marginBottom: theme.spacing.sm, fontSize: theme.typography.fontSizeSm }}>
+                  Errors, failures, and broken tool calls that need fixing.
+                </Typography.Text>
+
+                {healCount > 0 ? (
+                  <div css={{ display: 'grid', gridTemplateColumns: selectedAlert ? '1fr 1fr' : '1fr', gap: theme.spacing.md }}>
+                    <div>
+                      {alerts.map((alert, i) => (
+                        <Card
+                          componentId="mlflow.improve.alert-card"
+                          key={`alert-${i}`}
+                          css={{
+                            marginBottom: theme.spacing.sm,
+                            borderLeft: `3px solid ${theme.colors.textValidationDanger}`,
+                            padding: theme.spacing.md,
+                            cursor: 'pointer',
+                            backgroundColor: selectedAlert?.trace_id === alert.trace_id ? theme.colors.actionTertiaryBackgroundPress : undefined,
+                          }}
+                          onClick={() => setSelectedAlert(selectedAlert?.trace_id === alert.trace_id ? null : alert)}
+                        >
+                          <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: theme.spacing.xs }}>
+                            <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center' }}>
                               <Tag componentId="mlflow.improve.alert-sev" color="coral">Error</Tag>
                               <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm }}>
                                 {alert.timestamp ? new Date(alert.timestamp).toLocaleString() : alert.trace_id.substring(0, 20) + '...'}
                               </Typography.Text>
                             </div>
-                            <Typography.Text bold css={{ display: 'block' }}>{alert.failing_span}</Typography.Text>
-                            <Typography.Text color="secondary" css={{ display: 'block', marginTop: 2 }}>
-                              {alert.error_message.length > 120 ? alert.error_message.substring(0, 120) + '...' : alert.error_message}
-                            </Typography.Text>
-                            {alert.user_query && (
-                              <Typography.Text color="secondary" css={{ display: 'block', marginTop: theme.spacing.xs, fontSize: theme.typography.fontSizeSm }}>
-                                Query: {alert.user_query.length > 80 ? alert.user_query.substring(0, 80) + '...' : alert.user_query}
-                              </Typography.Text>
-                            )}
+                            <Button componentId="mlflow.improve.fix-alert-inline" type="primary" danger loading={isFixing === alert.trace_id} onClick={(e: React.MouseEvent) => { e.stopPropagation(); triggerFix(null, alert); }} css={{ flexShrink: 0 }}>
+                              Fix it
+                            </Button>
                           </div>
-                        </div>
-                      </Card>
-                    ))}
+                          <Typography.Text bold css={{ display: 'block' }}>{alert.failing_span}</Typography.Text>
+                          <Typography.Text color="secondary" css={{ display: 'block', marginTop: 2 }}>
+                            {alert.error_message.length > 120 ? alert.error_message.substring(0, 120) + '...' : alert.error_message}
+                          </Typography.Text>
+                        </Card>
+                      ))}
 
-                    {/* Optimization suggestions */}
-                    {activeSuggestions.map((s) => (
-                      <Card componentId="mlflow.improve.suggestion-card" key={s.id} css={{ marginBottom: theme.spacing.sm }}>
+                      {healSuggestions.map((s) => (
+                        <Card componentId="mlflow.improve.heal-suggestion" key={s.id} css={{ marginBottom: theme.spacing.sm, borderLeft: `3px solid ${theme.colors.textValidationDanger}`, padding: theme.spacing.md }}>
+                          <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: theme.spacing.xs }}>
+                            <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center' }}>
+                              <Tag componentId="mlflow.improve.sev-tag" color={SEVERITY_COLORS[s.severity] || 'charcoal'}>{s.severity}</Tag>
+                              <Tag componentId="mlflow.improve.type-tag" color="charcoal">{TYPE_LABELS[s.type] || s.type}</Tag>
+                              <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm }}>
+                                {Math.round(s.confidence * 100)}% confidence
+                              </Typography.Text>
+                            </div>
+                            <Button componentId="mlflow.improve.fix-heal" type="primary" danger loading={isFixing === s.id} onClick={() => triggerFix(s, null)} css={{ flexShrink: 0 }}>
+                              Fix it
+                            </Button>
+                          </div>
+                          <Typography.Title level={4} css={{ marginTop: theme.spacing.xs }}>{s.title}</Typography.Title>
+                          <Typography.Text color="secondary" css={{ display: 'block', marginTop: 2 }}>{s.description}</Typography.Text>
+                          <div css={{ marginTop: theme.spacing.sm, padding: theme.spacing.sm, backgroundColor: theme.colors.backgroundSecondary, borderRadius: 4 }}>
+                            <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block' }}>Recommended action</Typography.Text>
+                            <Typography.Text css={{ display: 'block', marginTop: 4 }}>{s.action}</Typography.Text>
+                          </div>
+                        </Card>
+                      ))}
+                    </div>
+
+                    {selectedAlert && (
+                      <div>
+                        <Typography.Title level={4} css={{ marginBottom: theme.spacing.sm }}>Error Detail</Typography.Title>
+                        <Card componentId="mlflow.improve.alert-detail" css={{ marginBottom: theme.spacing.sm }}>
+                          <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block', marginBottom: theme.spacing.xs }}>Error Message</Typography.Text>
+                          <div css={{ backgroundColor: theme.colors.backgroundSecondary, padding: theme.spacing.sm, borderRadius: 4, fontFamily: 'monospace', fontSize: 12, overflowX: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                            {selectedAlert.error_message}
+                          </div>
+                        </Card>
+                        {selectedAlert.user_query && (
+                          <Card componentId="mlflow.improve.alert-query" css={{ marginBottom: theme.spacing.sm }}>
+                            <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block', marginBottom: theme.spacing.xs }}>User Query</Typography.Text>
+                            <Typography.Text>{selectedAlert.user_query}</Typography.Text>
+                          </Card>
+                        )}
+                        <Card componentId="mlflow.improve.trace-ref" css={{ marginBottom: theme.spacing.sm }}>
+                          <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block', marginBottom: theme.spacing.xs }}>Trace Reference</Typography.Text>
+                          <Typography.Text css={{ display: 'block' }}>Trace ID: <code>{selectedAlert.trace_id}</code></Typography.Text>
+                          <Typography.Text css={{ display: 'block', marginTop: 2 }}>Failing span: <code>{selectedAlert.failing_span}</code></Typography.Text>
+                        </Card>
+                        <Button componentId="mlflow.improve.fix-alert" type="primary" danger loading={isFixing === selectedAlert.trace_id} onClick={() => triggerFix(null, selectedAlert)} css={{ width: '100%' }}>
+                          Fix It
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <Card componentId="mlflow.improve.no-heal">
+                    <div css={{ textAlign: 'center', padding: theme.spacing.md }}>
+                      <Typography.Text color="secondary">No errors or failures detected.</Typography.Text>
+                    </div>
+                  </Card>
+                )}
+              </div>
+            </Tabs.Content>
+
+            {/* ── Self-Improvement Tab ── */}
+            <Tabs.Content value="improvement">
+              <div css={{ paddingTop: theme.spacing.md }}>
+                <Typography.Text color="secondary" css={{ display: 'block', marginBottom: theme.spacing.sm, fontSize: theme.typography.fontSizeSm }}>
+                  Optimization opportunities: redundant calls, slow execution, declining scores.
+                </Typography.Text>
+
+                {improveCount > 0 ? (
+                  <div>
+                    {improveSuggestions.map((s) => (
+                      <Card componentId="mlflow.improve.suggestion-card" key={s.id} css={{ marginBottom: theme.spacing.sm, padding: theme.spacing.md }}>
                         <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: theme.spacing.xs }}>
                           <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center' }}>
                             <Tag componentId="mlflow.improve.sev-tag" color={SEVERITY_COLORS[s.severity] || 'charcoal'}>{s.severity}</Tag>
@@ -385,150 +583,99 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
                               {Math.round(s.confidence * 100)}% confidence
                             </Typography.Text>
                           </div>
-                          {repoSaved && (
-                            <Button
-                              componentId="mlflow.improve.fix-suggestion"
-                              type="primary"
-                              loading={isFixing === s.id}
-                              onClick={() => triggerFix(s, null)}
-                              css={{ flexShrink: 0 }}
-                            >
-                              Fix it
-                            </Button>
-                          )}
+                          <Button componentId="mlflow.improve.fix-suggestion" type="primary" loading={isFixing === s.id} onClick={() => triggerFix(s, null)} css={{ flexShrink: 0 }}>
+                            Fix it
+                          </Button>
                         </div>
                         <Typography.Title level={4} css={{ marginTop: theme.spacing.xs }}>{s.title}</Typography.Title>
                         <Typography.Text color="secondary" css={{ display: 'block', marginTop: 2 }}>{s.description}</Typography.Text>
                         <div css={{ marginTop: theme.spacing.sm, padding: theme.spacing.sm, backgroundColor: theme.colors.backgroundSecondary, borderRadius: 4 }}>
-                          <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block' }}>
-                            Recommended action
-                          </Typography.Text>
+                          <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block' }}>Recommended action</Typography.Text>
                           <Typography.Text css={{ display: 'block', marginTop: 4 }}>{s.action}</Typography.Text>
                         </div>
                       </Card>
                     ))}
                   </div>
-
-                  {/* Alert detail panel */}
-                  {selectedAlert && (
-                    <div>
-                      <Typography.Title level={4} css={{ marginBottom: theme.spacing.sm }}>Error Detail</Typography.Title>
-
-                      <Card componentId="mlflow.improve.alert-detail" css={{ marginBottom: theme.spacing.sm }}>
-                        <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block', marginBottom: theme.spacing.xs }}>
-                          Error Message
-                        </Typography.Text>
-                        <div css={{
-                          backgroundColor: theme.colors.backgroundSecondary,
-                          padding: theme.spacing.sm,
-                          borderRadius: 4,
-                          fontFamily: 'monospace',
-                          fontSize: 12,
-                          overflowX: 'auto',
-                          whiteSpace: 'pre-wrap',
-                          wordBreak: 'break-word',
-                        }}>
-                          {selectedAlert.error_message}
-                        </div>
-                      </Card>
-
-                      {selectedAlert.user_query && (
-                        <Card componentId="mlflow.improve.alert-query" css={{ marginBottom: theme.spacing.sm }}>
-                          <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block', marginBottom: theme.spacing.xs }}>
-                            User Query
-                          </Typography.Text>
-                          <Typography.Text>{selectedAlert.user_query}</Typography.Text>
-                        </Card>
-                      )}
-
-                      {repoSaved && (
-                        <Card componentId="mlflow.improve.linked-agent" css={{ marginBottom: theme.spacing.sm }}>
-                          <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block', marginBottom: theme.spacing.xs }}>
-                            Linked Agent
-                          </Typography.Text>
-                          <Typography.Text bold css={{ display: 'block' }}>{githubRepo}</Typography.Text>
-                          <Button
-                            componentId="mlflow.improve.view-repo-detail"
-                            css={{ marginTop: theme.spacing.sm }}
-                            onClick={() => window.open(`https://github.com/${githubRepo}`, '_blank')}
-                          >
-                            View Repo
-                          </Button>
-                        </Card>
-                      )}
-
-                      <Card componentId="mlflow.improve.trace-ref" css={{ marginBottom: theme.spacing.sm }}>
-                        <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm, textTransform: 'uppercase', display: 'block', marginBottom: theme.spacing.xs }}>
-                          Trace Reference
-                        </Typography.Text>
-                        <Typography.Text css={{ display: 'block' }}>Trace ID: <code>{selectedAlert.trace_id}</code></Typography.Text>
-                        <Typography.Text css={{ display: 'block', marginTop: 2 }}>Failing span: <code>{selectedAlert.failing_span}</code></Typography.Text>
-                      </Card>
-
-                      {repoSaved && (
-                        <Button
-                          componentId="mlflow.improve.fix-alert"
-                          type="primary"
-                          danger
-                          loading={isFixing === selectedAlert.trace_id}
-                          onClick={() => triggerFix(null, selectedAlert)}
-                          css={{ width: '100%' }}
-                        >
-                          Fix It
-                        </Button>
-                      )}
+                ) : (
+                  <Card componentId="mlflow.improve.no-improve">
+                    <div css={{ textAlign: 'center', padding: theme.spacing.md }}>
+                      <Typography.Text color="secondary">No optimization opportunities detected. Your agent is performing well.</Typography.Text>
                     </div>
+                  </Card>
+                )}
+              </div>
+            </Tabs.Content>
+
+            {/* ── Resolved Tab ── */}
+            {(resolvedFixes.length > 0 || isLoadingPrStatus) && (
+              <Tabs.Content value="resolved">
+                <div css={{ paddingTop: theme.spacing.md }}>
+                  {isLoadingPrStatus && resolvedFixes.length === 0 && (
+                    <Typography.Text color="secondary" css={{ display: 'block', marginBottom: theme.spacing.sm, fontSize: theme.typography.fontSizeSm }}>
+                      Checking PR status...
+                    </Typography.Text>
                   )}
-                </div>
-              ) : (
-                <Card componentId="mlflow.improve.no-issues">
-                  <div css={{ textAlign: 'center', padding: theme.spacing.lg }}>
-                    <Typography.Text color="secondary">
-                      No issues detected. Your agent is performing well.
-                    </Typography.Text>
-                  </div>
-                </Card>
-              )}
-            </div>
-          </Tabs.Content>
-
-          {/* Resolved Tab */}
-          <Tabs.Content value="resolved">
-            <div css={{ paddingTop: theme.spacing.md }}>
-              {resolvedFixes.length > 0 ? (
-                <>
-                  {resolvedFixes.map((r, i) => (
-                    <Card componentId="mlflow.improve.resolved-card" key={i} css={{ marginBottom: theme.spacing.sm }}>
-                      <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center' }}>
-                          <Tag componentId="mlflow.improve.resolved-tag" color="teal">Fixed</Tag>
-                          <Typography.Text>{r.title}</Typography.Text>
+                  {resolvedFixes.map((r, i) => {
+                    const statusColor: TagColors =
+                      r.status === 'merged' ? 'teal' :
+                      r.status === 'open' ? 'lemon' :
+                      r.status === 'closed' ? 'charcoal' :
+                      'teal';
+                    const statusLabel =
+                      r.status === 'merged' ? 'Merged' :
+                      r.status === 'open' ? 'Open' :
+                      r.status === 'closed' ? 'Closed' :
+                      'Fixed';
+                    return (
+                      <Card componentId="mlflow.improve.resolved-card" key={r.pr_url || i} css={{ marginBottom: theme.spacing.sm }}>
+                        <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center' }}>
+                            <Tag componentId="mlflow.improve.resolved-tag" color={statusColor}>{statusLabel}</Tag>
+                            <Typography.Text>{r.title}</Typography.Text>
+                          </div>
+                          {r.pr_url && (
+                            <Button componentId="mlflow.improve.view-pr" onClick={() => window.open(r.pr_url, '_blank')}>
+                              View PR
+                            </Button>
+                          )}
                         </div>
-                        {r.pr_url && (
-                          <Button
-                            componentId="mlflow.improve.view-pr"
-                            onClick={() => window.open(r.pr_url, '_blank')}
-                          >
-                            View PR
-                          </Button>
-                        )}
-                      </div>
-                    </Card>
-                  ))}
-                </>
-              ) : (
-                <Card componentId="mlflow.improve.no-resolved">
-                  <div css={{ textAlign: 'center', padding: theme.spacing.lg }}>
-                    <Typography.Text color="secondary">
-                      No resolved issues yet. Use "Fix it" on suggestions to create fix PRs.
-                    </Typography.Text>
-                  </div>
-                </Card>
-              )}
-            </div>
-          </Tabs.Content>
+                      </Card>
+                    );
+                  })}
+                </div>
+              </Tabs.Content>
+            )}
+          </Tabs.Root>
+        </>
+      )}
 
-        </Tabs.Root>
+      {/* PR result + Feedback */}
+      {lastFixPrUrl && (
+        <Card componentId="mlflow.improve.pr-result" css={{ marginTop: theme.spacing.lg }}>
+          <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm, marginBottom: theme.spacing.sm }}>
+            <Tag componentId="mlflow.improve.pr-tag" color="teal">PR Created</Tag>
+            <Typography.Text>
+              <a href={lastFixPrUrl} target="_blank" rel="noopener noreferrer">{lastFixPrUrl}</a>
+            </Typography.Text>
+          </div>
+          <Typography.Text color="secondary" css={{ display: 'block', marginBottom: theme.spacing.sm, fontSize: theme.typography.fontSizeSm }}>
+            Not satisfied? Describe what to adjust and the agent will make additional commits on the same branch.
+          </Typography.Text>
+          <div css={{ display: 'flex', gap: theme.spacing.sm }}>
+            <Input
+              componentId="mlflow.improve.feedback-input"
+              placeholder="e.g., don't change the model, just fix the prompt"
+              value={feedback}
+              onChange={(e) => setFeedback(e.target.value)}
+              onKeyDown={(e: React.KeyboardEvent) => { if (e.key === 'Enter') sendFeedback(); }}
+              css={{ flex: 1 }}
+              disabled={isSendingFeedback}
+            />
+            <Button componentId="mlflow.improve.send-feedback" type="primary" loading={isSendingFeedback} onClick={sendFeedback} disabled={!feedback.trim()}>
+              Send Feedback
+            </Button>
+          </div>
+        </Card>
       )}
     </div>
   );

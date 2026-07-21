@@ -30,6 +30,68 @@ from .suggestions import generate_suggestions, Suggestion
 
 _logger = logging.getLogger(__name__)
 
+MIN_TRACES = 10
+
+_ERROR_TERM_PATTERNS = [
+    r"model[_ ]not[_ ]found[:\s]+['\"]?([a-zA-Z0-9._-]+)",
+    r"(?:unknown|invalid|unsupported)\s+model[:\s]+['\"]?([a-zA-Z0-9._-]+)",
+    r"(?:requested\s+)?model\s+['\"]([a-zA-Z0-9._-]+)['\"]",
+    r"(?:KeyError|NameError|AttributeError)[:\s]+['\"]?([a-zA-Z0-9_.]+)",
+    r"No module named ['\"]([a-zA-Z0-9_.]+)",
+    r"does not exist.*['\"]([a-zA-Z0-9._-]{5,})['\"]",
+    r"['\"]([a-zA-Z0-9._-]{5,})['\"].*does not exist",
+]
+
+
+def _check_errors_against_code(
+    error_sigs: set[str], repo_dir: "Path"
+) -> set[str]:
+    """Check which error signatures have been fixed in the current code.
+
+    Extracts searchable terms from error messages (model names, key names,
+    module names) and greps the repo. If the term no longer appears in the
+    code, the error is likely resolved.
+    """
+    import re
+    import subprocess
+
+    resolved = set()
+    for sig in error_sigs:
+        error_msg = sig.split(":", 1)[1] if ":" in sig else sig
+
+        _noise = {"error", "type", "message", "none", "null", "true", "false", "code", "status", "data", "value", "result"}
+        search_terms: list[str] = []
+        for pattern in _ERROR_TERM_PATTERNS:
+            matches = re.findall(pattern, error_msg, re.IGNORECASE)
+            search_terms.extend(m for m in matches if m.lower() not in _noise)
+
+        if not search_terms:
+            continue
+
+        all_absent = True
+        for term in search_terms:
+            if len(term) < 4:
+                continue
+            try:
+                result = subprocess.run(
+                    ["grep", "-rl", "--include=*.py", "--include=*.yaml",
+                     "--include=*.yml", "--include=*.json", "--include=*.toml",
+                     "--include=*.env", term, str(repo_dir)],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    all_absent = False
+                    break
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                all_absent = False
+                break
+
+        if all_absent and search_terms:
+            resolved.add(sig)
+            _logger.info("Error signature resolved in code: %s (term '%s' absent)", sig, search_terms[0])
+
+    return resolved
+
 
 def analyze(
     experiment_name: str,
@@ -99,6 +161,20 @@ def analyze(
             max_results=trace_count,
         )
 
+        if len(raw_traces) > 0 and len(raw_traces) < MIN_TRACES:
+            return {
+                "findings": [],
+                "code_findings": [],
+                "suggestions": [],
+                "alerts": [],
+                "summary": {
+                    "status": "insufficient_traces",
+                    "experiment_name": experiment_name,
+                    "traces_available": len(raw_traces),
+                    "traces_required": MIN_TRACES,
+                },
+            }
+
         if len(raw_traces) > 0:
             for _, row in raw_traces.iterrows():
                 traces_data.append({
@@ -108,11 +184,13 @@ def analyze(
                     "assessments": row.get("assessments", []),
                 })
 
-            trace_finding_objs = analyze_traces(traces_data)
+            analysis_mode = mode if mode in ("heal", "improve") else None
+            trace_finding_objs = analyze_traces(traces_data, mode=analysis_mode)
             trace_findings = [
                 {
                     "pattern": f.pattern,
                     "severity": f.severity,
+                    "category": f.category,
                     "description": f.description,
                     "evidence": f.evidence,
                 }
@@ -144,11 +222,14 @@ def analyze(
         except Exception:
             _logger.exception("Dynamic code analysis failed")
 
+    _CODE_HEAL_PATTERNS = {"missing_error_handling", "anti_pattern", "security"}
+
     all_finding_objs = list(trace_finding_objs)
     for cf in code_findings_list:
         all_finding_objs.append(Finding(
             pattern=cf.pattern,
             severity=cf.severity,
+            category="heal" if cf.pattern in _CODE_HEAL_PATTERNS else "improve",
             description=cf.description,
             evidence={
                 **(cf.evidence or {}),
@@ -169,10 +250,34 @@ def analyze(
     latencies = [p["execution_ms"] for p in parsed if p["execution_ms"] > 0]
     avg_latency_ms = round(sum(latencies) / len(latencies)) if latencies else 0
 
-    alerts = []
+    recency_window = min(5, len(parsed))
+    recent_error_sigs: set[str] = set()
+    for p in parsed[:recency_window]:
+        for err in p.get("error_details", []):
+            sig = f"{err['span_name']}:{(err['error_message'] or '')[:200]}"
+            recent_error_sigs.add(sig)
+
+    repo_dir = None
+    if has_repo and repo_url:
+        try:
+            repo_dir = clone_or_fetch_repo(repo_url, branch)
+        except Exception:
+            pass
+
+    resolved_in_code: set[str] = set()
+    if repo_dir:
+        resolved_in_code = _check_errors_against_code(recent_error_sigs, repo_dir)
+
+    raw_alerts: list[dict] = []
     for p in parsed:
         if p["error_details"]:
             first_error = p["error_details"][0]
+            sig = f"{first_error['span_name']}:{(first_error['error_message'] or '')[:200]}"
+            if sig not in recent_error_sigs:
+                continue
+            if sig in resolved_in_code:
+                continue
+
             timestamp = None
             if p.get("start_ns") and p["start_ns"] > 0:
                 from datetime import datetime, timezone
@@ -180,14 +285,23 @@ def analyze(
                     p["start_ns"] / 1e9, tz=timezone.utc
                 ).isoformat()
 
-            alerts.append({
+            raw_alerts.append({
                 "trace_id": p["trace_id"],
                 "error_message": first_error["error_message"] or "Unknown error",
                 "user_query": p["user_query"] or "",
                 "failing_span": first_error["span_name"],
                 "severity": "high",
                 "timestamp": timestamp,
+                "_sig": sig,
             })
+
+    seen_sigs: set[str] = set()
+    alerts: list[dict] = []
+    for a in raw_alerts:
+        if a["_sig"] not in seen_sigs:
+            seen_sigs.add(a["_sig"])
+            alert = {k: v for k, v in a.items() if k != "_sig"}
+            alerts.append(alert)
 
     return {
         "findings": trace_findings,
@@ -209,6 +323,7 @@ def analyze(
                 "id": s.id,
                 "type": s.type,
                 "severity": s.severity,
+                "category": s.category,
                 "title": s.title,
                 "description": s.description,
                 "action": s.action,

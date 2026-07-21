@@ -19,6 +19,7 @@ class Suggestion:
     id: str
     type: str  # "model_upgrade", "prompt_fix", "config_change", "investigate"
     severity: str  # "low", "medium", "high"
+    category: str  # "heal" or "improve"
     title: str
     description: str
     action: str
@@ -62,6 +63,7 @@ def _handle_context_bloat(finding: Finding) -> Suggestion:
         id=_make_id(finding.pattern, finding.description),
         type="model_upgrade",
         severity=finding.severity,
+        category=finding.category,
         title="Context window pressure detected",
         description=(
             f"Traces are averaging {avg_size / 1_000_000:.1f}MB "
@@ -83,6 +85,7 @@ def _handle_context_growth(finding: Finding) -> Suggestion:
         id=_make_id(finding.pattern, finding.description),
         type="investigate",
         severity=finding.severity,
+        category=finding.category,
         title="Trace sizes growing over time",
         description=(
             f"Recent traces are {ratio:.1f}x larger than older ones. "
@@ -105,6 +108,7 @@ def _handle_tool_redundancy(finding: Finding) -> Suggestion:
         id=_make_id(finding.pattern, finding.description),
         type="prompt_fix",
         severity=finding.severity,
+        category=finding.category,
         title=f"Redundant tool calls: {worst}",
         description=(
             f"The agent is calling {worst} multiple times in {rate:.0%} of runs. "
@@ -132,6 +136,7 @@ def _handle_score_degradation(finding: Finding) -> Suggestion:
         id=_make_id(finding.pattern, finding.description),
         type="prompt_fix" if scorer in action_map else "investigate",
         severity=finding.severity,
+        category=finding.category,
         title=f"{scorer} score is low ({pass_rate:.0%})",
         description=(
             f"The {scorer} evaluation is passing only {pass_rate:.0%} of the time. "
@@ -153,6 +158,7 @@ def _handle_score_declining(finding: Finding) -> Suggestion:
         id=_make_id(finding.pattern, finding.description),
         type="investigate",
         severity=finding.severity,
+        category=finding.category,
         title=f"{scorer} quality declining",
         description=(
             f"{scorer} dropped from {older:.0%} to {recent:.0%} in recent runs. "
@@ -172,6 +178,7 @@ def _handle_slow_execution(finding: Finding) -> Suggestion:
         id=_make_id(finding.pattern, finding.description),
         type="config_change",
         severity=finding.severity,
+        category=finding.category,
         title=f"Slow pipeline ({avg_ms / 1000:.0f}s average)",
         description=(
             f"Pipeline runs are averaging {avg_ms / 1000:.0f} seconds. "
@@ -192,6 +199,7 @@ def _handle_execution_slowdown(finding: Finding) -> Suggestion:
         id=_make_id(finding.pattern, finding.description),
         type="investigate",
         severity=finding.severity,
+        category=finding.category,
         title=f"Execution time increasing ({ratio:.1f}x slower)",
         description=(
             f"Recent runs are {ratio:.1f}x slower than older ones. "
@@ -213,6 +221,7 @@ def _handle_error_spike(finding: Finding) -> Suggestion:
         id=_make_id(finding.pattern, finding.description),
         type="investigate",
         severity=finding.severity,
+        category=finding.category,
         title=f"Tool errors increasing ({rate:.0%} of runs affected)",
         description=(
             f"Tool calls are failing in {rate:.0%} of recent runs "
@@ -233,6 +242,7 @@ def _handle_incomplete_pipeline(finding: Finding) -> Suggestion:
         id=_make_id(finding.pattern, finding.description),
         type="prompt_fix",
         severity=finding.severity,
+        category=finding.category,
         title="Pipeline steps being skipped",
         description=(
             f"The agent is not completing all pipeline steps. "
@@ -276,6 +286,7 @@ def _handle_code_finding(finding: Finding) -> Suggestion:
         id=_make_id(finding.pattern, finding.description),
         type=type_map.get(finding.pattern, "investigate"),
         severity=finding.severity,
+        category=finding.category,
         title=f"[Code] {finding.description[:80]}",
         description=f"In `{file_path}`: {root_cause}",
         action=suggested_fix,
