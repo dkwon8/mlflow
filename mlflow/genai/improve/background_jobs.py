@@ -80,6 +80,10 @@ def invoke_improve_fix_job(
     issue_id: str,
     experiment_id: str,
     run_id: str | None = None,
+    source: str = "manual",
+    suggestion_title: str | None = None,
+    suggestion_description: str | None = None,
+    suggestion_action: str | None = None,
 ):
     """
     Job function to create a fix PR for a detected issue.
@@ -87,17 +91,27 @@ def invoke_improve_fix_job(
     Reads the issue details and experiment's GitHub repo connection,
     then uses the configured code agent to clone the repo, analyze
     the issue, and create a pull request with a fix.
+
+    When called from the scheduler with suggestion_* fields, skips
+    the Issue entity lookup and uses the suggestion details directly.
     """
     from mlflow.genai.improve.fix_agent_registry import FixRequest, get_agent
 
-    # Ensure built-in agents are registered
     import mlflow.genai.improve.fix_agents  # noqa: F401
-
-    from mlflow.tracing.client import TracingClient
 
     client = MlflowClient()
     try:
-        issue = TracingClient()._get_issue(issue_id)
+        if suggestion_title:
+            issue_name = suggestion_title
+            issue_description = suggestion_description or ""
+            root_causes = [suggestion_action] if suggestion_action else []
+        else:
+            from mlflow.tracing.client import TracingClient
+            issue = TracingClient()._get_issue(issue_id)
+            issue_name = issue.name
+            issue_description = issue.description
+            root_causes = issue.root_causes or []
+
         experiment = client.get_experiment(experiment_id)
 
         exp_tags = experiment.tags or {}
@@ -113,9 +127,9 @@ def invoke_improve_fix_job(
         agent = get_agent(agent_name)
         request = FixRequest(
             issue_id=issue_id,
-            issue_name=issue.name,
-            issue_description=issue.description,
-            root_causes=issue.root_causes or [],
+            issue_name=issue_name,
+            issue_description=issue_description,
+            root_causes=root_causes,
             repo_url=repo_url,
             branch=branch,
             experiment_id=experiment_id,
@@ -124,12 +138,32 @@ def invoke_improve_fix_job(
         fix_result = agent.create_fix(request)
 
         if fix_result.success and fix_result.pr_url:
-            from mlflow.tracing.client import TracingClient
+            if not suggestion_title:
+                from mlflow.tracing.client import TracingClient
+                try:
+                    TracingClient().store.update_issue(
+                        issue_id=issue_id,
+                        status=IssueStatus.RESOLVED,
+                        description=f"{issue_description}\n\n**Fix PR:** {fix_result.pr_url}",
+                    )
+                except Exception:
+                    pass
 
-            TracingClient().store.update_issue(
-                issue_id=issue_id,
-                status=IssueStatus.RESOLVED,
-                description=f"{issue.description}\n\n**Fix PR:** {fix_result.pr_url}",
+            import json as _json
+            resolved_raw = exp_tags.get("mlflow.improve.resolved_fixes", "[]")
+            try:
+                resolved = _json.loads(resolved_raw)
+            except (ValueError, TypeError):
+                resolved = []
+            resolved.append({
+                "issue_id": issue_id,
+                "title": issue_name,
+                "pr_url": fix_result.pr_url,
+                "repo_url": repo_url,
+                "source": source,
+            })
+            client.set_experiment_tag(
+                experiment_id, "mlflow.improve.resolved_fixes", _json.dumps(resolved)
             )
 
         if run_id:

@@ -5148,6 +5148,7 @@ def _invoke_improve_fix_handler():
             "title": issue_name,
             "pr_url": result.pr_url,
             "repo_url": repo_url,
+            "source": "manual",
         })
         client.set_experiment_tag(experiment_id, "mlflow.improve.resolved_fixes", _json.dumps(resolved))
 
@@ -5318,6 +5319,7 @@ def _invoke_improve_pr_status_handler():
                 "repo_url": repo_url,
                 "status": pr["status"],
                 "branch": pr.get("branch", ""),
+                "source": tag_match.get("source", "manual") if tag_match else "manual",
             })
 
     for tag_fix in tag_resolved:

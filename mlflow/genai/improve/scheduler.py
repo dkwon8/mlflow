@@ -102,9 +102,7 @@ def _monitor_experiment(exp, client, tracking_store) -> None:
     if new_patterns:
         _logger.warning("Improve monitor: %d new issues in %s: %s", len(new_patterns), exp.name, new_patterns)
 
-    auto_fix = tags.get(MLFLOW_IMPROVE_AUTO_FIX) == "true"
-    if auto_fix:
-        _maybe_auto_fix(exp.experiment_id, result.get("suggestions", []))
+    _maybe_auto_fix(exp.experiment_id, result.get("suggestions", []), result.get("alerts", []))
 
 
 _SEVERITY_MAP = {
@@ -140,24 +138,46 @@ def _create_issues_for_suggestions(experiment_id: str, suggestions: list[dict]) 
             _logger.debug("Failed to create issue for %s", suggestion.get("title"), exc_info=True)
 
 
-def _maybe_auto_fix(experiment_id: str, suggestions: list[dict]) -> None:
-    """Submit fix jobs for high-confidence auto-fixable suggestions."""
+def _maybe_auto_fix(experiment_id: str, suggestions: list[dict], alerts: list[dict] | None = None) -> None:
+    """Submit fix jobs for heal-category suggestions automatically."""
+    from mlflow.client import MlflowClient
     from mlflow.genai.improve.background_jobs import invoke_improve_fix_job
     from mlflow.server.jobs import submit_job
 
+    alert_context = ""
+    if alerts:
+        alert_lines = []
+        for a in alerts[:3]:
+            alert_lines.append(f"- {a.get('failing_span', '?')}: {a.get('error_message', '')[:300]}")
+        alert_context = "\n\nRecent errors from traces:\n" + "\n".join(alert_lines)
+
+    client = MlflowClient()
+    experiment = client.get_experiment(experiment_id)
+    resolved_raw = (experiment.tags or {}).get("mlflow.improve.resolved_fixes", "[]")
+    try:
+        resolved_ids = {r.get("issue_id") for r in json.loads(resolved_raw)}
+    except (ValueError, TypeError):
+        resolved_ids = set()
+
     fixable = [
         s for s in suggestions
-        if s.get("severity") == "high"
-        and s.get("auto_applicable")
-        and s.get("confidence", 0) >= 0.8
+        if s.get("category") == "heal" and s.get("id") not in resolved_ids
     ]
 
     for s in fixable:
-        _logger.info("Improve monitor: submitting auto-fix for '%s'", s["title"])
+        _logger.info("Improve monitor: auto-healing '%s'", s["title"])
+        description = s.get("description", "") + alert_context
         try:
             submit_job(
                 invoke_improve_fix_job,
-                {"issue_id": s["id"], "experiment_id": experiment_id},
+                {
+                    "issue_id": s["id"],
+                    "experiment_id": experiment_id,
+                    "source": "auto",
+                    "suggestion_title": s.get("title", ""),
+                    "suggestion_description": description,
+                    "suggestion_action": s.get("action", ""),
+                },
             )
         except Exception:
-            _logger.debug("Failed to submit fix job for %s", s.get("title"), exc_info=True)
+            _logger.debug("Failed to submit auto-fix for %s", s.get("title"), exc_info=True)

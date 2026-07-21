@@ -50,6 +50,7 @@ interface ResolvedFix {
   repo_url?: string;
   status?: 'merged' | 'open' | 'closed' | 'unknown';
   branch?: string;
+  source?: 'auto' | 'manual';
 }
 
 interface AnalysisResult {
@@ -329,6 +330,7 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
 
   const healCount = healSuggestions.length + alerts.length;
   const improveCount = improveSuggestions.length;
+  const autoFixOpenPRs = resolvedFixes.filter((r) => r.source === 'auto' && r.status === 'open');
 
   return (
     <div css={{ padding: theme.spacing.lg, overflowY: 'auto', height: '100%' }}>
@@ -413,6 +415,29 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
             <Typography.Text color="warning">
               Not enough traces for analysis. Have {analysisResult.summary.traces_available}, need at least {analysisResult.summary.traces_required}. Run your agent more to generate traces.
             </Typography.Text>
+          </div>
+        </Card>
+      )}
+
+      {/* Auto-fix banner */}
+      {autoFixOpenPRs.length > 0 && (
+        <Card componentId="mlflow.improve.auto-fix-banner" css={{ marginBottom: theme.spacing.md, borderLeft: `3px solid ${theme.colors.textValidationSuccess}`, backgroundColor: 'rgba(34, 197, 94, 0.06)' }}>
+          <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <Typography.Text bold css={{ display: 'block' }}>
+                Self-Healing auto-created {autoFixOpenPRs.length} fix PR{autoFixOpenPRs.length > 1 ? 's' : ''}
+              </Typography.Text>
+              <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm }}>
+                Review and merge to apply.
+              </Typography.Text>
+            </div>
+            <div css={{ display: 'flex', gap: theme.spacing.xs }}>
+              {autoFixOpenPRs.map((pr) => (
+                <Button key={pr.pr_url} componentId="mlflow.improve.auto-fix-pr" onClick={() => window.open(pr.pr_url, '_blank')}>
+                  View PR
+                </Button>
+              ))}
+            </div>
           </div>
         </Card>
       )}

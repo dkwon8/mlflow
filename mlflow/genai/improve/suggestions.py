@@ -229,8 +229,8 @@ def _handle_error_spike(finding: Finding) -> Suggestion:
             f"API quota limits, or incorrect tool arguments."
         ),
         action="Check MCP server logs. Verify API keys and rate limits. Review tool call arguments in failing traces.",
-        confidence=0.7,
-        auto_applicable=False,
+        confidence=0.85,
+        auto_applicable=True,
         evidence=finding.evidence,
     )
 
