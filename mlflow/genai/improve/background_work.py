@@ -20,7 +20,7 @@ _SEVERITY_MAP = {
 @job(name="invoke_improve_analysis", max_workers=2)
 def invoke_improve_analysis_job(
     experiment_id: str,
-    trace_count: int = 20,
+    trace_count: int = 10,
     run_id: str | None = None,
 ):
     """
@@ -138,33 +138,27 @@ def invoke_improve_fix_job(
         fix_result = agent.create_fix(request)
 
         if fix_result.success and fix_result.pr_url:
-            if not suggestion_title:
-                from mlflow.tracing.client import TracingClient
+            from mlflow.tracing.client import TracingClient
+            store = TracingClient().store
+            resolved_description = f"{issue_description}\n\n**Fix PR:** {fix_result.pr_url}"
+            try:
+                store.update_issue(
+                    issue_id=issue_id,
+                    status=IssueStatus.RESOLVED,
+                    description=resolved_description,
+                )
+            except Exception:
                 try:
-                    TracingClient().store.update_issue(
-                        issue_id=issue_id,
+                    store.create_issue(
+                        experiment_id=experiment_id,
+                        name=issue_name,
+                        description=resolved_description,
                         status=IssueStatus.RESOLVED,
-                        description=f"{issue_description}\n\n**Fix PR:** {fix_result.pr_url}",
+                        categories=["[improve_fix]"],
+                        created_by="mlflow.improve.fix_agent",
                     )
                 except Exception:
-                    pass
-
-            import json as _json
-            resolved_raw = exp_tags.get("mlflow.improve.resolved_fixes", "[]")
-            try:
-                resolved = _json.loads(resolved_raw)
-            except (ValueError, TypeError):
-                resolved = []
-            resolved.append({
-                "issue_id": issue_id,
-                "title": issue_name,
-                "pr_url": fix_result.pr_url,
-                "repo_url": repo_url,
-                "source": source,
-            })
-            client.set_experiment_tag(
-                experiment_id, "mlflow.improve.resolved_fixes", _json.dumps(resolved)
-            )
+                    _logger.debug("Failed to record fix as Issue", exc_info=True)
 
         if run_id:
             status = RunStatus.FINISHED if fix_result.success else RunStatus.FAILED

@@ -139,8 +139,32 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
 
     const loadTraceCount = async () => {
       try {
+        const expIds = [experimentId];
+        const expResponse = await fetch(
+          getAjaxUrl(`ajax-api/2.0/mlflow/experiments/get?experiment_id=${experimentId}`),
+        );
+        if (expResponse.ok) {
+          const expData = await expResponse.json();
+          const repoTag = (expData.experiment?.tags || []).find((t: any) => t.key === 'mlflow.improve.github_repo');
+          if (repoTag?.value) {
+            const sibResponse = await fetch(
+              getAjaxUrl(`ajax-api/2.0/mlflow/experiments/search`),
+              { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filter: `tags.\`mlflow.improve.github_repo\` = '${repoTag.value}'`, max_results: 100 }) },
+            );
+            if (sibResponse.ok) {
+              const sibData = await sibResponse.json();
+              for (const sib of sibData.experiments || []) {
+                if (sib.experiment_id !== experimentId) {
+                  expIds.push(sib.experiment_id);
+                }
+              }
+            }
+          }
+        }
+        const idsQuery = expIds.map((id) => `experiment_ids=${id}`).join('&');
         const response = await fetch(
-          getAjaxUrl(`ajax-api/2.0/mlflow/traces?experiment_ids=${experimentId}&max_results=100`),
+          getAjaxUrl(`ajax-api/2.0/mlflow/traces?${idsQuery}&max_results=100`),
         );
         if (response.ok) {
           const data = await response.json();
@@ -187,7 +211,6 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
         body: JSON.stringify({
           experiment_id: experimentId,
           trace_count: 20,
-          mode: 'traces_only',
         }),
       });
       if (!response.ok) throw new Error(`Analysis failed: ${response.statusText}`);
@@ -330,7 +353,6 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
 
   const healCount = healSuggestions.length + alerts.length;
   const improveCount = improveSuggestions.length;
-  const autoFixOpenPRs = resolvedFixes.filter((r) => r.source === 'auto' && r.status === 'open');
 
   return (
     <div css={{ padding: theme.spacing.lg, overflowY: 'auto', height: '100%' }}>
@@ -359,7 +381,7 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
       {/* GitHub Connection */}
       <Card componentId="mlflow.improve.github-card" css={{ marginBottom: theme.spacing.md }}>
         <Typography.Text color="secondary" css={{ display: 'block', marginBottom: theme.spacing.sm, fontSize: theme.typography.fontSizeSm }}>
-          <FormattedMessage defaultMessage="GitHub Repository" description="GitHub connection label" />
+          <FormattedMessage defaultMessage="GitHub Repository (owner/repo format, GitHub only)" description="GitHub connection label" />
         </Typography.Text>
         <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'center', flexWrap: 'wrap' }}>
           <Input
@@ -419,59 +441,19 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
         </Card>
       )}
 
-      {/* Auto-fix banner */}
-      {autoFixOpenPRs.length > 0 && (
-        <Card componentId="mlflow.improve.auto-fix-banner" css={{ marginBottom: theme.spacing.md, borderLeft: `3px solid ${theme.colors.textValidationSuccess}`, backgroundColor: 'rgba(34, 197, 94, 0.06)' }}>
-          <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: theme.spacing.lg }}>
-            <div css={{ flexShrink: 0 }}>
-              <Typography.Text bold css={{ display: 'block' }}>
-                Self-Healing auto-created {autoFixOpenPRs.length} fix PR{autoFixOpenPRs.length > 1 ? 's' : ''}
-              </Typography.Text>
-              <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm }}>
-                Review and merge to apply.
-              </Typography.Text>
-            </div>
-            <div css={{ display: 'flex', gap: theme.spacing.sm }}>
-              {[...autoFixOpenPRs].sort((a, b) => (a.pr_number ?? 0) - (b.pr_number ?? 0)).map((pr) => (
-                <Button key={pr.pr_url} componentId="mlflow.improve.auto-fix-pr" onClick={() => window.open(pr.pr_url, '_blank')}>
-                  {pr.pr_number ? `View PR #${pr.pr_number}` : 'View PR'}
-                </Button>
-              ))}
-            </div>
-          </div>
-        </Card>
-      )}
-
       {/* Health Dashboard */}
       {summary && summary.status === 'ok' && (
         <>
-          <div css={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: theme.spacing.md, marginBottom: theme.spacing.md }}>
-            {[
-              { label: 'Total Traces', value: summary.total_traces ?? summary.traces_analyzed ?? 0, color: theme.colors.textPrimary, bg: 'rgba(130, 140, 160, 0.08)' },
-              { label: 'Healthy', value: summary.healthy_count ?? 0, color: theme.colors.textValidationSuccess, bg: 'rgba(34, 197, 94, 0.10)' },
-              { label: 'Avg Latency', value: summary.avg_latency_ms ? `${(summary.avg_latency_ms / 1000).toFixed(1)}s` : '—', color: theme.colors.textPrimary, bg: 'rgba(99, 140, 210, 0.08)' },
-            ].map((card) => (
-              <Card componentId="mlflow.improve.health-card" key={card.label} css={{ textAlign: 'center', padding: theme.spacing.md, minWidth: 0, overflow: 'hidden', backgroundColor: card.bg, border: `1px solid ${card.bg}` }}>
-                <Typography.Text color="secondary" css={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block' }}>
-                  {card.label}
-                </Typography.Text>
-                <Typography.Title level={2} css={{ marginTop: theme.spacing.xs, marginBottom: 0, color: card.color }}>
-                  {card.value}
-                </Typography.Title>
-              </Card>
-            ))}
-          </div>
-
-          <Tabs.Root componentId="mlflow.improve.sections" defaultValue="healing">
+          <Tabs.Root componentId="mlflow.improve.sections" defaultValue="fix">
             <Tabs.List>
-              <Tabs.Trigger value="healing">
-                Self-Healing
+              <Tabs.Trigger value="fix">
+                Fix
                 <Tag componentId="mlflow.improve.heal-count" color={healCount > 0 ? 'coral' : 'charcoal'} css={{ marginLeft: theme.spacing.xs }}>
                   {healCount}
                 </Tag>
               </Tabs.Trigger>
               <Tabs.Trigger value="improvement">
-                Self-Improvement
+                Improve / Fine-Tune
                 <Tag componentId="mlflow.improve.improve-count" color={improveCount > 0 ? 'lemon' : 'charcoal'} css={{ marginLeft: theme.spacing.xs }}>
                   {improveCount}
                 </Tag>
@@ -486,8 +468,8 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
               )}
             </Tabs.List>
 
-            {/* ── Self-Healing Tab ── */}
-            <Tabs.Content value="healing">
+            {/* ── Fix Tab ── */}
+            <Tabs.Content value="fix">
               <div css={{ paddingTop: theme.spacing.md }}>
                 <Typography.Text color="secondary" css={{ display: 'block', marginBottom: theme.spacing.sm, fontSize: theme.typography.fontSizeSm }}>
                   Errors, failures, and broken tool calls that need fixing.
@@ -587,7 +569,7 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
               </div>
             </Tabs.Content>
 
-            {/* ── Self-Improvement Tab ── */}
+            {/* ── Improve / Fine-Tune Tab ── */}
             <Tabs.Content value="improvement">
               <div css={{ paddingTop: theme.spacing.md }}>
                 <Typography.Text color="secondary" css={{ display: 'block', marginBottom: theme.spacing.sm, fontSize: theme.typography.fontSizeSm }}>

@@ -40,6 +40,16 @@ class ClaudeCodeAgent(CodeAgent):
         return "claude-code"
 
     def create_fix(self, request: FixRequest) -> FixResult:
+        if not _sdk_available() and not shutil.which("claude"):
+            return FixResult(
+                success=False,
+                error="Claude Code CLI is required. Install: npm install -g @anthropic-ai/claude-code",
+            )
+        if not shutil.which("gh"):
+            return FixResult(
+                success=False,
+                error="GitHub CLI (gh) is required for PR creation. Install: https://cli.github.com/",
+            )
         try:
             cached_dir = clone_or_fetch_repo(request.repo_url, request.branch)
             work_dir = Path(tempfile.mkdtemp(prefix="mlflow-fix-"))

@@ -5005,13 +5005,10 @@ def _invoke_issue_detection_handler():
 @_disable_if_artifacts_only
 def _invoke_improve_analysis_handler():
     """
-    Run improve analysis on an experiment's traces and/or repository code.
+    Run improve analysis on an experiment's traces and codebase.
 
-    Supports multiple analysis modes:
-    - "auto": Runs both trace and code analysis if available (default)
-    - "traces_only": Traditional rule-based trace analysis
-    - "code_only": LLM-powered code analysis (no traces needed)
-    - "both": Explicitly run both
+    Always analyzes both traces and code together. Requires a connected
+    GitHub repository and at least 10 traces.
     """
     from mlflow.genai.improve import analyze
 
@@ -5021,7 +5018,6 @@ def _invoke_improve_analysis_handler():
         schema={
             "experiment_id": [_assert_required, _assert_string],
             "trace_count": [_assert_intlike],
-            "mode": [_assert_string],
             "model": [_assert_string],
             "repo_url": [_assert_string],
             "branch": [_assert_string],
@@ -5030,7 +5026,6 @@ def _invoke_improve_analysis_handler():
 
     experiment_id = request_json.get("experiment_id")
     trace_count = request_json.get("trace_count", 20)
-    mode = request_json.get("mode", "auto")
     model = request_json.get("model", "openai:/gpt-5.4-mini")
 
     client = MlflowClient()
@@ -5040,23 +5035,56 @@ def _invoke_improve_analysis_handler():
     repo_url = request_json.get("repo_url") or exp_tags.get("mlflow.improve.github_repo")
     branch = request_json.get("branch") or exp_tags.get("mlflow.improve.github_branch", "main")
 
+    if repo_url:
+        try:
+            from mlflow.entities.experiment_tag import ExperimentTag
+            store = _get_tracking_store()
+            store.set_experiment_tag(
+                experiment_id, ExperimentTag("mlflow.improve.active_monitor", "true")
+            )
+            siblings = client.search_experiments(
+                filter_string=f"tags.`mlflow.improve.github_repo` = '{repo_url}'"
+            )
+            for sib in siblings:
+                if sib.experiment_id != experiment_id:
+                    sib_tags = sib.tags or {}
+                    if sib_tags.get("mlflow.improve.active_monitor") == "true":
+                        store.set_experiment_tag(
+                            sib.experiment_id,
+                            ExperimentTag("mlflow.improve.active_monitor", "false"),
+                        )
+        except Exception:
+            pass
+
     result = analyze(
         experiment_name=experiment.name,
         trace_count=trace_count,
         repo_url=repo_url,
         branch=branch,
         model=model,
-        mode=mode,
     )
 
-    import json as _json
-
-    resolved_raw = exp_tags.get("mlflow.improve.resolved_fixes", "[]")
-    try:
-        resolved = _json.loads(resolved_raw)
-    except (ValueError, TypeError):
-        resolved = []
-    result["resolved_fixes"] = resolved
+    import re as _re
+    store = _get_tracking_store()
+    resolved_issues = store.search_issues(
+        experiment_id=experiment_id,
+        filter_string="status = 'resolved'",
+    )
+    resolved_fixes = []
+    for issue in resolved_issues:
+        if not any("[improve_" in c for c in (issue.categories or [])):
+            continue
+        pr_url = None
+        pr_match = _re.search(r"\*\*Fix PR:\*\*\s*(https?://\S+)", issue.description or "")
+        if pr_match:
+            pr_url = pr_match.group(1)
+        resolved_fixes.append({
+            "issue_id": issue.issue_id,
+            "title": issue.name,
+            "pr_url": pr_url,
+            "status": "merged",
+        })
+    result["resolved_fixes"] = resolved_fixes
 
     return jsonify(result)
 
@@ -5136,21 +5164,28 @@ def _invoke_improve_fix_handler():
     result = agent.create_fix(fix_request)
 
     if result.success and result.pr_url:
-        import json as _json
-
-        resolved_raw = exp_tags.get("mlflow.improve.resolved_fixes", "[]")
+        from mlflow.entities.issue import IssueStatus
+        from mlflow.server.handlers import _get_tracking_store
+        store = _get_tracking_store()
+        resolved_description = f"{issue_name}\n\n**Fix PR:** {result.pr_url}"
         try:
-            resolved = _json.loads(resolved_raw)
-        except (ValueError, TypeError):
-            resolved = []
-        resolved.append({
-            "issue_id": issue_id,
-            "title": issue_name,
-            "pr_url": result.pr_url,
-            "repo_url": repo_url,
-            "source": "manual",
-        })
-        client.set_experiment_tag(experiment_id, "mlflow.improve.resolved_fixes", _json.dumps(resolved))
+            store.update_issue(
+                issue_id=issue_id,
+                status=IssueStatus.RESOLVED,
+                description=resolved_description,
+            )
+        except Exception:
+            try:
+                store.create_issue(
+                    experiment_id=experiment_id,
+                    name=issue_name,
+                    description=resolved_description,
+                    status=IssueStatus.RESOLVED,
+                    categories=["[improve_fix]"],
+                    created_by="mlflow.improve.fix_agent",
+                )
+            except Exception:
+                pass
 
     return jsonify({
         "success": result.success,
@@ -5286,6 +5321,8 @@ def _invoke_improve_pr_status_handler():
         }
     )
 
+    import re as _re
+
     experiment_id = request_json.get("experiment_id")
     client = MlflowClient()
     experiment = client.get_experiment(experiment_id)
@@ -5295,40 +5332,60 @@ def _invoke_improve_pr_status_handler():
     if not repo_url:
         return jsonify({"resolved_fixes": []})
 
-    resolved_raw = exp_tags.get("mlflow.improve.resolved_fixes", "[]")
-    try:
-        tag_resolved = _json.loads(resolved_raw)
-    except (ValueError, TypeError):
-        tag_resolved = []
+    store = _get_tracking_store()
+    resolved_issues = store.search_issues(
+        experiment_id=experiment_id,
+        filter_string="status = 'resolved'",
+    )
+
+    issue_fixes = []
+    for issue in resolved_issues:
+        if not any("[improve_" in c for c in (issue.categories or [])):
+            continue
+        pr_url = None
+        pr_match = _re.search(r"\*\*Fix PR:\*\*\s*(https?://\S+)", issue.description or "")
+        if pr_match:
+            pr_url = pr_match.group(1)
+        issue_fixes.append({
+            "issue_id": issue.issue_id,
+            "title": issue.name,
+            "pr_url": pr_url,
+        })
 
     github_prs = _fetch_github_pr_status(repo_url)
+    github_status_by_url = {pr["pr_url"]: pr for pr in github_prs if pr.get("pr_url")}
 
-    seen_urls = set()
     merged = []
+    seen_urls = set()
+
+    for fix in issue_fixes:
+        url = fix.get("pr_url")
+        gh_pr = github_status_by_url.get(url, {}) if url else {}
+        merged.append({
+            "issue_id": fix["issue_id"],
+            "title": fix["title"],
+            "pr_url": url,
+            "pr_number": gh_pr.get("pr_number"),
+            "repo_url": repo_url,
+            "status": gh_pr.get("status", "unknown"),
+            "branch": gh_pr.get("branch", ""),
+        })
+        if url:
+            seen_urls.add(url)
 
     for pr in github_prs:
         url = pr["pr_url"]
         if url and url not in seen_urls:
             seen_urls.add(url)
-            tag_match = next((t for t in tag_resolved if t.get("pr_url") == url), None)
             merged.append({
-                "issue_id": tag_match.get("issue_id", "") if tag_match else "",
+                "issue_id": "",
                 "title": pr["title"],
                 "pr_url": url,
                 "pr_number": pr.get("pr_number"),
                 "repo_url": repo_url,
                 "status": pr["status"],
                 "branch": pr.get("branch", ""),
-                "source": tag_match.get("source", "manual") if tag_match else "manual",
             })
-
-    for tag_fix in tag_resolved:
-        url = tag_fix.get("pr_url", "")
-        if url and url not in seen_urls:
-            seen_urls.add(url)
-            merged.append({**tag_fix, "status": "unknown"})
-        elif not url:
-            merged.append({**tag_fix, "status": "unknown"})
 
     return jsonify({"resolved_fixes": merged})
 

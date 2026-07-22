@@ -12,9 +12,12 @@ engine uses to generate actionable fixes.
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter
 from dataclasses import dataclass, field
 from statistics import mean as _mean, pstdev as _pstdev
+
+_logger = logging.getLogger(__name__)
 
 
 HEAL_PATTERNS = {"error_spike"}
@@ -102,40 +105,58 @@ def _severity_from_z(z: float, invert: bool = False) -> str | None:
 
 def _extract_span_info(span: dict) -> dict:
     """Extract useful fields from a raw span dict."""
-    attrs = span.get("attributes", {})
-    if isinstance(attrs, str):
-        try:
-            import ast
-            attrs = ast.literal_eval(attrs)
-        except (ValueError, SyntaxError):
-            attrs = {}
+    try:
+        attrs = span.get("attributes", {})
+        if isinstance(attrs, str):
+            try:
+                attrs = json.loads(attrs)
+            except (json.JSONDecodeError, TypeError):
+                try:
+                    import ast
+                    attrs = ast.literal_eval(attrs)
+                except (ValueError, SyntaxError):
+                    attrs = {}
 
-    status = span.get("status", {})
-    if isinstance(status, str):
-        try:
-            import ast
-            status = ast.literal_eval(status)
-        except (ValueError, SyntaxError):
-            status = {}
+        status = span.get("status", {})
+        if isinstance(status, str):
+            try:
+                status = json.loads(status)
+            except (json.JSONDecodeError, TypeError):
+                try:
+                    import ast
+                    status = ast.literal_eval(status)
+                except (ValueError, SyntaxError):
+                    status = {}
 
-    span_type = attrs.get("mlflow.spanType", "").strip('"')
-    status_code = status.get("code", "") if isinstance(status, dict) else ""
-    status_message = status.get("message", "") if isinstance(status, dict) else ""
+        span_type = attrs.get("mlflow.spanType", "").strip('"')
+        status_code = status.get("code", "") if isinstance(status, dict) else ""
+        status_message = status.get("message", "") if isinstance(status, dict) else ""
 
-    span_inputs = attrs.get("mlflow.spanInputs", "")
-    if isinstance(span_inputs, str):
-        span_inputs = span_inputs.strip('"')
+        span_inputs = attrs.get("mlflow.spanInputs", "")
+        if isinstance(span_inputs, str):
+            span_inputs = span_inputs.strip('"')
 
-    return {
-        "name": span.get("name", ""),
-        "span_type": span_type,
-        "is_error": status_code == "STATUS_CODE_ERROR",
-        "error_message": status_message if status_code == "STATUS_CODE_ERROR" else "",
-        "start_ns": int(span.get("start_time_unix_nano", 0)),
-        "end_ns": int(span.get("end_time_unix_nano", 0)),
-        "inputs": span_inputs,
-        "parent_span_id": span.get("parent_span_id"),
-    }
+        return {
+            "name": span.get("name", ""),
+            "span_type": span_type,
+            "is_error": status_code == "STATUS_CODE_ERROR",
+            "error_message": status_message if status_code == "STATUS_CODE_ERROR" else "",
+            "start_ns": int(span.get("start_time_unix_nano", 0)),
+            "end_ns": int(span.get("end_time_unix_nano", 0)),
+            "inputs": span_inputs,
+            "parent_span_id": span.get("parent_span_id"),
+        }
+    except Exception:
+        return {
+            "name": span.get("name", ""),
+            "span_type": "",
+            "is_error": False,
+            "error_message": "",
+            "start_ns": 0,
+            "end_ns": 0,
+            "inputs": "",
+            "parent_span_id": None,
+        }
 
 
 def _parse_trace(trace_row: dict) -> dict:
@@ -211,13 +232,12 @@ def _parse_trace(trace_row: dict) -> dict:
     }
 
 
-def analyze_traces(traces_data: list[dict], mode: str | None = None) -> list[Finding]:
+def analyze_traces(traces_data: list[dict]) -> list[Finding]:
     """Run all detection patterns against a set of traces.
 
     Args:
         traces_data: List of raw trace dicts from mlflow.search_traces().
             Each dict should have keys: spans, execution_duration, assessments.
-        mode: Optional "heal" or "improve" to filter findings by category.
 
     Returns:
         List of Finding objects describing detected issues.
@@ -234,10 +254,6 @@ def analyze_traces(traces_data: list[dict], mode: str | None = None) -> list[Fin
     findings.extend(_detect_slowdown(parsed))
     findings.extend(_detect_error_spike(parsed))
     findings.extend(_detect_incomplete_pipeline(parsed))
-
-    if mode:
-        target = HEAL_PATTERNS if mode == "heal" else IMPROVE_PATTERNS
-        findings = [f for f in findings if f.pattern in target]
 
     return findings
 

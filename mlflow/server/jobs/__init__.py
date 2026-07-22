@@ -25,8 +25,8 @@ _SUPPORTED_JOB_FUNCTION_LIST = [
     "mlflow.genai.optimize.job.optimize_prompts_job",
     "mlflow.genai.discovery.job.invoke_issue_detection_job",
     "mlflow.genai.evaluation.job.invoke_genai_evaluate_job",
-    "mlflow.genai.improve.background_jobs.invoke_improve_analysis_job",
-    "mlflow.genai.improve.background_jobs.invoke_improve_fix_job",
+    "mlflow.genai.improve.background_work.invoke_improve_analysis_job",
+    "mlflow.genai.improve.background_work.invoke_improve_fix_job",
 ]
 
 if supported_job_function_list_env := os.environ.get("_MLFLOW_SUPPORTED_JOB_FUNCTION_LIST"):

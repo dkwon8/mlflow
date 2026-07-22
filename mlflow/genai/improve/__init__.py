@@ -1,10 +1,9 @@
 """
-MLflow Improve — self-optimization for MLflow-deployed agents.
+MLflow Improve — continuous diagnostics for MLflow-deployed agents.
 
-Three analysis layers:
-  1. Statistical baseline detectors (z-score anomaly detection on traces)
-  2. LLM-as-judge scorers (MLflow built-in: completeness, correctness, etc.)
-  3. LLM code analyzer (clones repo, reads source, finds issues)
+Analyzes an agent's traces and codebase together to detect problems
+and suggest fixes. Works with any agent framework that logs traces
+to MLflow.
 
 Usage:
     from mlflow.genai.improve import analyze
@@ -20,77 +19,16 @@ from __future__ import annotations
 import logging
 
 from .trace_analyzer import analyze_traces, Finding, _parse_trace
-from .code_analyzer import (
-    CodeFinding,
-    analyze_code,
-    clone_or_fetch_repo,
-    select_relevant_files,
-)
+from .code_analyzer import CodeFinding, analyze_code
+from .github_fetcher import fetch_repo_files
 from .suggestions import generate_suggestions, Suggestion
+from .summary import compute_alerts, compute_summary
 
 _logger = logging.getLogger(__name__)
 
 MIN_TRACES = 10
 
-_ERROR_TERM_PATTERNS = [
-    r"model[_ ]not[_ ]found[:\s]+['\"]?([a-zA-Z0-9._-]+)",
-    r"(?:unknown|invalid|unsupported)\s+model[:\s]+['\"]?([a-zA-Z0-9._-]+)",
-    r"(?:requested\s+)?model\s+['\"]([a-zA-Z0-9._-]+)['\"]",
-    r"(?:KeyError|NameError|AttributeError)[:\s]+['\"]?([a-zA-Z0-9_.]+)",
-    r"No module named ['\"]([a-zA-Z0-9_.]+)",
-    r"does not exist.*['\"]([a-zA-Z0-9._-]{5,})['\"]",
-    r"['\"]([a-zA-Z0-9._-]{5,})['\"].*does not exist",
-]
-
-
-def _check_errors_against_code(
-    error_sigs: set[str], repo_dir: "Path"
-) -> set[str]:
-    """Check which error signatures have been fixed in the current code.
-
-    Extracts searchable terms from error messages (model names, key names,
-    module names) and greps the repo. If the term no longer appears in the
-    code, the error is likely resolved.
-    """
-    import re
-    import subprocess
-
-    resolved = set()
-    for sig in error_sigs:
-        error_msg = sig.split(":", 1)[1] if ":" in sig else sig
-
-        _noise = {"error", "type", "message", "none", "null", "true", "false", "code", "status", "data", "value", "result"}
-        search_terms: list[str] = []
-        for pattern in _ERROR_TERM_PATTERNS:
-            matches = re.findall(pattern, error_msg, re.IGNORECASE)
-            search_terms.extend(m for m in matches if m.lower() not in _noise)
-
-        if not search_terms:
-            continue
-
-        all_absent = True
-        for term in search_terms:
-            if len(term) < 4:
-                continue
-            try:
-                result = subprocess.run(
-                    ["grep", "-rl", "--include=*.py", "--include=*.yaml",
-                     "--include=*.yml", "--include=*.json", "--include=*.toml",
-                     "--include=*.env", term, str(repo_dir)],
-                    capture_output=True, text=True, timeout=10,
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    all_absent = False
-                    break
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                all_absent = False
-                break
-
-        if all_absent and search_terms:
-            resolved.add(sig)
-            _logger.info("Error signature resolved in code: %s (term '%s' absent)", sig, search_terms[0])
-
-    return resolved
+_CODE_HEAL_PATTERNS = {"missing_error_handling", "anti_pattern", "security"}
 
 
 def analyze(
@@ -100,15 +38,12 @@ def analyze(
     repo_url: str | None = None,
     branch: str = "main",
     model: str = "openai:/gpt-5.4-mini",
-    mode: str = "auto",
 ) -> dict:
-    """Analyze traces and/or repository code to generate improvement suggestions.
+    """Analyze an agent's traces and codebase to diagnose problems and suggest fixes.
 
-    Supports three analysis modes:
-    - "traces_only": Traditional rule-based trace analysis (existing behavior)
-    - "code_only": LLM-powered analysis of the connected repo (no traces needed)
-    - "both": Run both trace and code analysis, merge findings
-    - "auto": If traces exist, run both; if no traces, run code-only
+    Always analyzes both traces and code together. Requires:
+    - A GitHub repository connected to the experiment
+    - At least 10 traces logged
 
     Args:
         experiment_name: Name of the MLflow experiment to analyze.
@@ -118,7 +53,6 @@ def analyze(
             the experiment's mlflow.improve.github_repo tag if not provided.
         branch: Branch to analyze (default "main").
         model: Model URI for LLM code analysis (default "openai:/gpt-5.4-mini").
-        mode: Analysis mode — "auto", "traces_only", "code_only", or "both".
 
     Returns:
         Dict with keys:
@@ -135,94 +69,77 @@ def analyze(
 
     exp = mlflow.get_experiment_by_name(experiment_name)
     if not exp:
-        return {
-            "findings": [],
-            "code_findings": [],
-            "suggestions": [],
-            "alerts": [],
-            "summary": {"status": "no_experiment", "experiment_name": experiment_name},
-        }
+        return _empty_result("no_experiment", experiment_name)
 
     if not repo_url:
         repo_url = exp.tags.get("mlflow.improve.github_repo")
 
-    has_repo = bool(repo_url)
+    if not repo_url:
+        return _empty_result("no_repo", experiment_name,
+                             error="Connect a GitHub repository to use the improve feature.")
 
-    trace_finding_objs: list[Finding] = []
-    trace_findings: list[dict] = []
-    traces_data: list[dict] = []
+    sibling_exps = mlflow.search_experiments(
+        filter_string=f"tags.`mlflow.improve.github_repo` = '{repo_url}'"
+    )
+    all_exp_ids = [e.experiment_id for e in sibling_exps] if sibling_exps else [exp.experiment_id]
+    if exp.experiment_id not in all_exp_ids:
+        all_exp_ids.append(exp.experiment_id)
 
-    run_traces = mode in ("traces_only", "both") or (mode == "auto")
-    run_code = mode in ("code_only", "both") or (mode == "auto" and has_repo)
+    raw_traces = mlflow.search_traces(
+        experiment_ids=all_exp_ids,
+        max_results=trace_count,
+    )
 
-    if run_traces:
-        raw_traces = mlflow.search_traces(
-            experiment_ids=[exp.experiment_id],
-            max_results=trace_count,
-        )
+    if len(raw_traces) == 0:
+        return _empty_result("no_traces", experiment_name,
+                             error="No traces found. Run your agent to generate traces first.")
 
-        if len(raw_traces) > 0 and len(raw_traces) < MIN_TRACES:
-            return {
-                "findings": [],
-                "code_findings": [],
-                "suggestions": [],
-                "alerts": [],
-                "summary": {
-                    "status": "insufficient_traces",
-                    "experiment_name": experiment_name,
-                    "traces_available": len(raw_traces),
-                    "traces_required": MIN_TRACES,
-                },
-            }
+    if len(raw_traces) < MIN_TRACES:
+        return _empty_result("insufficient_traces", experiment_name,
+                             traces_available=len(raw_traces),
+                             traces_required=MIN_TRACES,
+                             error=f"Need at least {MIN_TRACES} traces (currently {len(raw_traces)}).")
 
-        if len(raw_traces) > 0:
-            for _, row in raw_traces.iterrows():
-                traces_data.append({
-                    "trace_id": row.get("trace_id", ""),
-                    "spans": row.get("spans", []),
-                    "execution_duration": int(row.get("execution_duration", 0) or 0),
-                    "assessments": row.get("assessments", []),
-                })
+    traces_data = []
+    for _, row in raw_traces.iterrows():
+        traces_data.append({
+            "trace_id": row.get("trace_id", ""),
+            "spans": row.get("spans", []),
+            "execution_duration": int(row.get("execution_duration", 0) or 0),
+            "assessments": row.get("assessments", []),
+        })
 
-            analysis_mode = mode if mode in ("heal", "improve") else None
-            trace_finding_objs = analyze_traces(traces_data, mode=analysis_mode)
-            trace_findings = [
-                {
-                    "pattern": f.pattern,
-                    "severity": f.severity,
-                    "category": f.category,
-                    "description": f.description,
-                    "evidence": f.evidence,
-                }
-                for f in trace_finding_objs
-            ]
-        elif mode == "auto" and has_repo:
-            run_code = True
+    trace_finding_objs = analyze_traces(traces_data)
+    trace_findings = [
+        {
+            "pattern": f.pattern,
+            "severity": f.severity,
+            "category": f.category,
+            "description": f.description,
+            "evidence": f.evidence,
+        }
+        for f in trace_finding_objs
+    ]
 
     code_findings_list: list[CodeFinding] = []
-    if run_code and has_repo:
-        try:
-            _logger.info("Running dynamic code analysis on %s", repo_url)
-            repo_dir = clone_or_fetch_repo(repo_url, branch)
+    selected_files: list[tuple[str, str]] = []
+    try:
+        _logger.info("Fetching code from %s via GitHub API", repo_url)
 
-            trace_hints = None
-            if traces_data:
-                hint_parsed = [_parse_trace(t) for t in traces_data]
-                trace_hints = list({
-                    tool for p in hint_parsed for tool in p["tool_names"]
-                })
+        hint_parsed = [_parse_trace(t) for t in traces_data]
+        trace_hints = list({
+            tool for p in hint_parsed for tool in p["tool_names"]
+        })
 
-            selected_files = select_relevant_files(repo_dir, trace_hints=trace_hints)
-            code_findings_list = analyze_code(
-                selected_files,
-                trace_findings=trace_findings if trace_findings else None,
-                model=model,
-            )
-            _logger.info("Code analysis found %d issues", len(code_findings_list))
-        except Exception:
-            _logger.exception("Dynamic code analysis failed")
-
-    _CODE_HEAL_PATTERNS = {"missing_error_handling", "anti_pattern", "security"}
+        selected_files = fetch_repo_files(repo_url, branch, trace_hints=trace_hints)
+        code_findings_list = analyze_code(
+            selected_files,
+            trace_findings=trace_findings if trace_findings else None,
+            model=model,
+        )
+        _logger.info("Code analysis found %d issues", len(code_findings_list))
+    except Exception:
+        _logger.exception("Dynamic code analysis failed")
 
     all_finding_objs = list(trace_finding_objs)
     for cf in code_findings_list:
@@ -241,67 +158,11 @@ def analyze(
 
     suggestions = generate_suggestions(all_finding_objs)
 
-    parsed = [_parse_trace(t) for t in traces_data] if traces_data else []
+    parsed = [_parse_trace(t) for t in traces_data]
 
-    total_tool_calls = sum(p["tool_call_count"] for p in parsed)
-    avg_tool_calls = total_tool_calls / len(parsed) if parsed else 0
-    error_count = sum(1 for p in parsed if p["error_count"] > 0)
-    healthy_count = len(parsed) - error_count
-    latencies = [p["execution_ms"] for p in parsed if p["execution_ms"] > 0]
-    avg_latency_ms = round(sum(latencies) / len(latencies)) if latencies else 0
-
-    recency_window = min(5, len(parsed))
-    recent_error_sigs: set[str] = set()
-    for p in parsed[:recency_window]:
-        for err in p.get("error_details", []):
-            sig = f"{err['span_name']}:{(err['error_message'] or '')[:200]}"
-            recent_error_sigs.add(sig)
-
-    repo_dir = None
-    if has_repo and repo_url:
-        try:
-            repo_dir = clone_or_fetch_repo(repo_url, branch)
-        except Exception:
-            pass
-
-    resolved_in_code: set[str] = set()
-    if repo_dir:
-        resolved_in_code = _check_errors_against_code(recent_error_sigs, repo_dir)
-
-    raw_alerts: list[dict] = []
-    for p in parsed:
-        if p["error_details"]:
-            first_error = p["error_details"][0]
-            sig = f"{first_error['span_name']}:{(first_error['error_message'] or '')[:200]}"
-            if sig not in recent_error_sigs:
-                continue
-            if sig in resolved_in_code:
-                continue
-
-            timestamp = None
-            if p.get("start_ns") and p["start_ns"] > 0:
-                from datetime import datetime, timezone
-                timestamp = datetime.fromtimestamp(
-                    p["start_ns"] / 1e9, tz=timezone.utc
-                ).isoformat()
-
-            raw_alerts.append({
-                "trace_id": p["trace_id"],
-                "error_message": first_error["error_message"] or "Unknown error",
-                "user_query": p["user_query"] or "",
-                "failing_span": first_error["span_name"],
-                "severity": "high",
-                "timestamp": timestamp,
-                "_sig": sig,
-            })
-
-    seen_sigs: set[str] = set()
-    alerts: list[dict] = []
-    for a in raw_alerts:
-        if a["_sig"] not in seen_sigs:
-            seen_sigs.add(a["_sig"])
-            alert = {k: v for k, v in a.items() if k != "_sig"}
-            alerts.append(alert)
+    alerts = compute_alerts(parsed, file_contents=selected_files if selected_files else None)
+    summary = compute_summary(experiment_name, parsed, trace_findings, code_findings_list, repo_url)
+    summary["experiments_pooled"] = len(all_exp_ids)
 
     return {
         "findings": trace_findings,
@@ -334,31 +195,18 @@ def analyze(
             for s in suggestions
         ],
         "alerts": alerts,
-        "summary": {
-            "status": "ok",
-            "experiment_name": experiment_name,
-            "traces_analyzed": len(traces_data),
-            "total_traces": len(parsed) if parsed else 0,
-            "healthy_count": healthy_count,
-            "error_count": error_count,
-            "avg_latency_ms": avg_latency_ms,
-            "findings_count": len(trace_findings) + len(code_findings_list),
-            "code_findings_count": len(code_findings_list),
-            "suggestions_count": len(suggestions),
-            "avg_tool_calls": round(avg_tool_calls, 1),
-            "high_severity": sum(
-                1 for f in trace_findings if f.get("severity") == "high"
-            ) + sum(
-                1 for f in code_findings_list if f.severity == "high"
-            ),
-            "medium_severity": sum(
-                1 for f in trace_findings if f.get("severity") == "medium"
-            ) + sum(
-                1 for f in code_findings_list if f.severity == "medium"
-            ),
-            "analysis_mode": mode,
-            "repo_analyzed": has_repo and run_code,
-        },
+        "summary": summary,
+    }
+
+
+def _empty_result(status: str, experiment_name: str, **extra) -> dict:
+    """Return an empty analysis result with the given status."""
+    return {
+        "findings": [],
+        "code_findings": [],
+        "suggestions": [],
+        "alerts": [],
+        "summary": {"status": status, "experiment_name": experiment_name, **extra},
     }
 
 

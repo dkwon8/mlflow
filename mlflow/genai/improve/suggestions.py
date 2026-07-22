@@ -29,7 +29,9 @@ class Suggestion:
 
 
 def _make_id(pattern: str, description: str) -> str:
-    digest = hashlib.sha256(f"{pattern}:{description}".encode()).hexdigest()[:8]
+    import re
+    stable_desc = re.sub(r"[\d.]+", "", description)
+    digest = hashlib.sha256(f"{pattern}:{stable_desc}".encode()).hexdigest()[:8]
     return f"s-{digest}"
 
 
@@ -71,9 +73,9 @@ def _handle_context_bloat(finding: Finding) -> Suggestion:
             f"As input volume grows, the context window will fill up "
             f"and the agent will start dropping information or failing."
         ),
-        action="Switch to a model with a larger context window (e.g., gpt-5.4-max with 1M tokens).",
+        action="Consider switching to a model with a larger context window, or implement context windowing/summarization to reduce input size.",
         confidence=0.85 if max_size > 2_000_000 else 0.7,
-        auto_applicable=True,
+        auto_applicable=False,
         evidence=finding.evidence,
     )
 
@@ -230,7 +232,7 @@ def _handle_error_spike(finding: Finding) -> Suggestion:
         ),
         action="Check MCP server logs. Verify API keys and rate limits. Review tool call arguments in failing traces.",
         confidence=0.85,
-        auto_applicable=True,
+        auto_applicable=False,
         evidence=finding.evidence,
     )
 

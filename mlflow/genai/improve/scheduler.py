@@ -1,4 +1,10 @@
-"""Periodic improve monitoring — scans experiments and runs analysis on a schedule."""
+"""Periodic improve monitoring — scans experiments and runs analysis on a schedule.
+
+Every 10 minutes, the Huey periodic task calls run_improve_monitoring_scheduler().
+It finds all experiments with a connected GitHub repo, runs the full analysis
+(traces + codebase), and creates MLflow Issue entities as notifications.
+Engineers see these in the Improve tab and decide whether to act.
+"""
 
 from __future__ import annotations
 
@@ -8,15 +14,14 @@ from datetime import datetime, timezone
 
 _logger = logging.getLogger(__name__)
 
-_DEFAULT_INTERVAL_MINUTES = 1
+_DEFAULT_INTERVAL_MINUTES = 10
 
 
 def run_improve_monitoring_scheduler() -> None:
-    """Scan experiments opted into auto-monitoring and run improve analysis.
+    """Scan experiments with connected repos and run improve analysis.
 
-    Called every minute by the Huey periodic task.  Each experiment has its
-    own rate-limit check via the ``mlflow.improve.last_monitor_time`` tag so
-    analysis only runs every N minutes (default 5).
+    Called every 10 minutes by the Huey periodic task. Each experiment has its
+    own rate-limit check via the ``mlflow.improve.last_monitor_time`` tag.
     """
     from mlflow.client import MlflowClient
     from mlflow.server.handlers import _get_tracking_store
@@ -43,11 +48,8 @@ def run_improve_monitoring_scheduler() -> None:
 def _monitor_experiment(exp, client, tracking_store) -> None:
     """Run a single monitoring cycle for one experiment."""
     from mlflow.entities.experiment_tag import ExperimentTag
-    from mlflow.entities.issue import IssueSeverity
     from mlflow.genai.improve import analyze
-    from mlflow.server.jobs import submit_job
     from mlflow.utils.mlflow_tags import (
-        MLFLOW_IMPROVE_AUTO_FIX,
         MLFLOW_IMPROVE_GITHUB_REPO,
         MLFLOW_IMPROVE_LAST_MONITOR_TIME,
     )
@@ -55,6 +57,9 @@ def _monitor_experiment(exp, client, tracking_store) -> None:
     tags = exp.tags or {}
     repo_url = tags.get(MLFLOW_IMPROVE_GITHUB_REPO)
     if not repo_url:
+        return
+
+    if tags.get("mlflow.improve.active_monitor") != "true":
         return
 
     interval_minutes = int(tags.get("mlflow.improve.monitor_interval_minutes", _DEFAULT_INTERVAL_MINUTES))
@@ -75,7 +80,6 @@ def _monitor_experiment(exp, client, tracking_store) -> None:
 
     result = analyze(
         experiment_name=exp.name,
-        mode="traces_only",
     )
 
     findings_count = result.get("summary", {}).get("findings_count", 0)
@@ -101,8 +105,6 @@ def _monitor_experiment(exp, client, tracking_store) -> None:
 
     if new_patterns:
         _logger.warning("Improve monitor: %d new issues in %s: %s", len(new_patterns), exp.name, new_patterns)
-
-    _maybe_auto_fix(exp.experiment_id, result.get("suggestions", []), result.get("alerts", []))
 
 
 _SEVERITY_MAP = {
@@ -136,48 +138,3 @@ def _create_issues_for_suggestions(experiment_id: str, suggestions: list[dict]) 
             )
         except Exception:
             _logger.debug("Failed to create issue for %s", suggestion.get("title"), exc_info=True)
-
-
-def _maybe_auto_fix(experiment_id: str, suggestions: list[dict], alerts: list[dict] | None = None) -> None:
-    """Submit fix jobs for heal-category suggestions automatically."""
-    from mlflow.client import MlflowClient
-    from mlflow.genai.improve.background_jobs import invoke_improve_fix_job
-    from mlflow.server.jobs import submit_job
-
-    alert_context = ""
-    if alerts:
-        alert_lines = []
-        for a in alerts[:3]:
-            alert_lines.append(f"- {a.get('failing_span', '?')}: {a.get('error_message', '')[:300]}")
-        alert_context = "\n\nRecent errors from traces:\n" + "\n".join(alert_lines)
-
-    client = MlflowClient()
-    experiment = client.get_experiment(experiment_id)
-    resolved_raw = (experiment.tags or {}).get("mlflow.improve.resolved_fixes", "[]")
-    try:
-        resolved_ids = {r.get("issue_id") for r in json.loads(resolved_raw)}
-    except (ValueError, TypeError):
-        resolved_ids = set()
-
-    fixable = [
-        s for s in suggestions
-        if s.get("category") == "heal" and s.get("id") not in resolved_ids
-    ]
-
-    for s in fixable:
-        _logger.info("Improve monitor: auto-healing '%s'", s["title"])
-        description = s.get("description", "") + alert_context
-        try:
-            submit_job(
-                invoke_improve_fix_job,
-                {
-                    "issue_id": s["id"],
-                    "experiment_id": experiment_id,
-                    "source": "auto",
-                    "suggestion_title": s.get("title", ""),
-                    "suggestion_description": description,
-                    "suggestion_action": s.get("action", ""),
-                },
-            )
-        except Exception:
-            _logger.debug("Failed to submit auto-fix for %s", s.get("title"), exc_info=True)

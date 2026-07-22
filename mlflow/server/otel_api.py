@@ -249,6 +249,18 @@ async def export_traces(
 
             _record_event(TracesReceivedByServerEvent, event_params)
 
+        try:
+            from mlflow.entities.span_status import SpanStatusCode
+
+            for span in all_spans:
+                if span.parent_id is None and span.status.status_code == SpanStatusCode.ERROR:
+                    from mlflow.genai.improve._error_hook import maybe_submit_error_analysis
+
+                    maybe_submit_error_analysis(x_mlflow_experiment_id)
+                    break
+        except Exception:
+            _logger.debug("Failed to trigger improve on error trace", exc_info=True)
+
     # Return protobuf response as per OTLP specification
     response_message = ExportTraceServiceResponse()
     response_bytes = response_message.SerializeToString()

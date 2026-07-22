@@ -295,6 +295,25 @@ class MlflowV3SpanExporter(SpanExporter):
             _logger.warning(f"Failed to link prompts to trace: {e}")
 
         self._maybe_propagate_repo_to_experiment(trace)
+        self._maybe_trigger_improve_on_error(trace)
+
+    def _maybe_trigger_improve_on_error(self, trace: Trace) -> None:
+        """If this trace has ERROR state, submit an improve analysis job."""
+        try:
+            from mlflow.entities.trace_state import TraceState
+
+            if trace.info.state != TraceState.ERROR:
+                return
+
+            experiment_id = trace.info.experiment_id
+            if not experiment_id:
+                return
+
+            from mlflow.genai.improve._error_hook import maybe_submit_error_analysis
+
+            maybe_submit_error_analysis(experiment_id)
+        except Exception:
+            _logger.debug("Failed to trigger improve on error trace", exc_info=True)
 
     def _maybe_propagate_repo_to_experiment(self, trace: Trace) -> None:
         """Auto-tag the experiment with the GitHub repo URL from trace metadata."""
