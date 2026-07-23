@@ -51,12 +51,33 @@ def _parse_repo_slug(repo_url: str) -> tuple[str, str]:
     )
 
 
+def _resolve_github_token() -> str | None:
+    """Resolve a GitHub token from environment or the gh CLI."""
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        return token
+
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    return None
+
+
 def _get_github_session() -> requests.Session:
     """Create a requests Session with GitHub API headers.
 
-    Uses GITHUB_TOKEN from environment if available (5000 req/hr).
-    Without a token, public repos still work but are limited to 60 req/hr.
-    Private repos always require a token.
+    Token resolution order:
+    1. GITHUB_TOKEN environment variable
+    2. ``gh auth token`` (GitHub CLI keyring)
+    3. Unauthenticated (60 req/hr, public repos only)
     """
     session = requests.Session()
     session.headers.update({
@@ -64,14 +85,13 @@ def _get_github_session() -> requests.Session:
         "X-GitHub-Api-Version": "2022-11-28",
     })
 
-    token = os.environ.get("GITHUB_TOKEN")
+    token = _resolve_github_token()
     if token:
         session.headers["Authorization"] = f"Bearer {token}"
     else:
         _logger.warning(
-            "GITHUB_TOKEN not set — using unauthenticated GitHub API (60 req/hr limit). "
-            "For production use, set GITHUB_TOKEN. Private repos will return 404 without it. "
-            "Generate a token at https://github.com/settings/tokens with 'Contents' read access."
+            "No GitHub token found — using unauthenticated API (60 req/hr limit). "
+            "Either set GITHUB_TOKEN or install the GitHub CLI (gh auth login)."
         )
 
     return session
