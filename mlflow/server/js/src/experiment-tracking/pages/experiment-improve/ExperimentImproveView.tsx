@@ -113,7 +113,6 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
   const [isLoadingPrStatus, setIsLoadingPrStatus] = useState(false);
   const [monitorActive, setMonitorActive] = useState(false);
   const [lastMonitorTime, setLastMonitorTime] = useState<string | null>(null);
-  const [monitorInterval, setMonitorInterval] = useState(10);
   const [elapsedMinutes, setElapsedMinutes] = useState<number | null>(null);
 
   const hasEnoughTraces = traceCount !== null && traceCount >= MIN_TRACES;
@@ -137,10 +136,8 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
           }
           const activeTag = tags.find((t: any) => t.key === 'mlflow.improve.active_monitor');
           const lastTimeTag = tags.find((t: any) => t.key === 'mlflow.improve.last_monitor_time');
-          const intervalTag = tags.find((t: any) => t.key === 'mlflow.improve.monitor_interval_minutes');
           setMonitorActive(activeTag?.value === 'true');
           setLastMonitorTime(lastTimeTag?.value || null);
-          if (intervalTag?.value) setMonitorInterval(parseInt(intervalTag.value, 10) || 10);
         }
       } catch {
         // Non-critical
@@ -392,13 +389,21 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
         )}
       </div>
 
-      {monitorActive && elapsedMinutes !== null && (
-        <div css={{ display: 'flex', justifyContent: 'flex-end', marginTop: -theme.spacing.sm, marginBottom: theme.spacing.md }}>
-          <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm }}>
-            Monitoring active &middot; last scan {elapsedMinutes < 1 ? 'just now' : `${elapsedMinutes}m ago`} &middot; next in ~{Math.max(0, monitorInterval - elapsedMinutes)}m
-          </Typography.Text>
-        </div>
-      )}
+      {monitorActive && elapsedMinutes !== null && (() => {
+        const formatTime = (mins: number) => {
+          if (mins < 1) return 'just now';
+          if (mins < 60) return `${mins} min ago`;
+          if (mins < 1440) return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
+          return `${Math.floor(mins / 1440)}d ${Math.floor((mins % 1440) / 60)}h ago`;
+        };
+        return (
+          <div css={{ display: 'flex', justifyContent: 'flex-end', marginTop: -theme.spacing.sm, marginBottom: theme.spacing.md }}>
+            <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm }}>
+              Monitoring Active: Last Scan {formatTime(elapsedMinutes)}
+            </Typography.Text>
+          </div>
+        );
+      })()}
 
       {/* Error */}
       {error && (
