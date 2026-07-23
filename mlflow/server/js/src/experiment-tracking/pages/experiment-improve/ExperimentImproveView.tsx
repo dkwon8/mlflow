@@ -389,7 +389,7 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
         )}
       </div>
 
-      {monitorActive && elapsedMinutes !== null && (() => {
+      {repoSaved && elapsedMinutes !== null && (() => {
         const formatTime = (mins: number) => {
           if (mins < 1) return 'just now';
           if (mins < 60) return `${mins} min ago`;
