@@ -111,6 +111,10 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
   const [isSendingFeedback, setIsSendingFeedback] = useState(false);
   const [prStatusFixes, setPrStatusFixes] = useState<ResolvedFix[]>([]);
   const [isLoadingPrStatus, setIsLoadingPrStatus] = useState(false);
+  const [monitorActive, setMonitorActive] = useState(false);
+  const [lastMonitorTime, setLastMonitorTime] = useState<string | null>(null);
+  const [monitorInterval, setMonitorInterval] = useState(10);
+  const [elapsedMinutes, setElapsedMinutes] = useState<number | null>(null);
 
   const hasEnoughTraces = traceCount !== null && traceCount >= MIN_TRACES;
   const canAnalyze = repoSaved && hasEnoughTraces;
@@ -131,6 +135,12 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
             setRepoSaved(true);
             setRepoSource((sourceTag?.value as 'auto' | 'manual') || 'manual');
           }
+          const activeTag = tags.find((t: any) => t.key === 'mlflow.improve.active_monitor');
+          const lastTimeTag = tags.find((t: any) => t.key === 'mlflow.improve.last_monitor_time');
+          const intervalTag = tags.find((t: any) => t.key === 'mlflow.improve.monitor_interval_minutes');
+          setMonitorActive(activeTag?.value === 'true');
+          setLastMonitorTime(lastTimeTag?.value || null);
+          if (intervalTag?.value) setMonitorInterval(parseInt(intervalTag.value, 10) || 10);
         }
       } catch {
         // Non-critical
@@ -198,6 +208,17 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
     loadTraceCount();
     loadPrStatus();
   }, [experimentId]);
+
+  useEffect(() => {
+    if (!lastMonitorTime) return;
+    const computeElapsed = () => {
+      const elapsed = (Date.now() - new Date(lastMonitorTime).getTime()) / 60000;
+      setElapsedMinutes(Math.max(0, Math.round(elapsed)));
+    };
+    computeElapsed();
+    const timer = setInterval(computeElapsed, 30000);
+    return () => clearInterval(timer);
+  }, [lastMonitorTime]);
 
   const runAnalysis = useCallback(async () => {
     setIsAnalyzing(true);
@@ -370,6 +391,14 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
           </Button>
         )}
       </div>
+
+      {monitorActive && elapsedMinutes !== null && (
+        <div css={{ display: 'flex', justifyContent: 'flex-end', marginTop: -theme.spacing.sm, marginBottom: theme.spacing.md }}>
+          <Typography.Text color="secondary" css={{ fontSize: theme.typography.fontSizeSm }}>
+            Monitoring active &middot; last scan {elapsedMinutes < 1 ? 'just now' : `${elapsedMinutes}m ago`} &middot; next in ~{Math.max(0, monitorInterval - elapsedMinutes)}m
+          </Typography.Text>
+        </div>
+      )}
 
       {/* Error */}
       {error && (
