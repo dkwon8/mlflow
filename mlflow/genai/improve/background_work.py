@@ -1,5 +1,9 @@
+import logging
+
 from mlflow.client import MlflowClient
 from mlflow.entities.issue import IssueSeverity, IssueStatus
+
+_logger = logging.getLogger(__name__)
 from mlflow.entities.run_status import RunStatus
 from mlflow.genai.improve import analyze
 from mlflow.server.jobs import job

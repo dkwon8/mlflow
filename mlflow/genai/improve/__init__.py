@@ -21,7 +21,7 @@ import logging
 from .trace_analyzer import analyze_traces, Finding, _parse_trace
 from .code_analyzer import CodeFinding, analyze_code
 from .github_fetcher import fetch_repo_files
-from .suggestions import generate_suggestions, Suggestion
+from .suggestions import generate_suggestions
 from .summary import compute_alerts, compute_summary
 
 _logger = logging.getLogger(__name__)
@@ -158,10 +158,8 @@ def analyze(
 
     suggestions = generate_suggestions(all_finding_objs)
 
-    parsed = [_parse_trace(t) for t in traces_data]
-
-    alerts = compute_alerts(parsed, file_contents=selected_files if selected_files else None)
-    summary = compute_summary(experiment_name, parsed, trace_findings, code_findings_list, repo_url)
+    alerts = compute_alerts(hint_parsed, file_contents=selected_files if selected_files else None)
+    summary = compute_summary(experiment_name, hint_parsed, trace_findings, code_findings_list, repo_url)
     summary["experiments_pooled"] = len(all_exp_ids)
 
     return {

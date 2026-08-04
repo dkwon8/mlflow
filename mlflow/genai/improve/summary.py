@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import logging
 import re
-import subprocess
-from pathlib import Path
 
 _logger = logging.getLogger(__name__)
 
@@ -182,47 +180,3 @@ def _check_errors_against_files(
     return resolved
 
 
-def _check_errors_against_code(
-    error_sigs: set[str], repo_dir: Path
-) -> set[str]:
-    """Check which error signatures have been fixed in the current codebase.
-
-    Extracts searchable terms from error messages (model names, key names,
-    module names) and greps the repo. If the term no longer appears in the
-    code, the error is likely resolved.
-    """
-    resolved = set()
-    for sig in error_sigs:
-        error_msg = sig.split(":", 1)[1] if ":" in sig else sig
-
-        search_terms: list[str] = []
-        for pattern in _ERROR_TERM_PATTERNS:
-            matches = re.findall(pattern, error_msg, re.IGNORECASE)
-            search_terms.extend(m for m in matches if m.lower() not in _NOISE_WORDS)
-
-        if not search_terms:
-            continue
-
-        all_absent = True
-        for term in search_terms:
-            if len(term) < 4:
-                continue
-            try:
-                result = subprocess.run(
-                    ["grep", "-rl", "--include=*.py", "--include=*.yaml",
-                     "--include=*.yml", "--include=*.json", "--include=*.toml",
-                     "--include=*.env", term, str(repo_dir)],
-                    capture_output=True, text=True, timeout=10,
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    all_absent = False
-                    break
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                all_absent = False
-                break
-
-        if all_absent and search_terms:
-            resolved.add(sig)
-            _logger.info("Error signature resolved in code: %s (term '%s' absent)", sig, search_terms[0])
-
-    return resolved

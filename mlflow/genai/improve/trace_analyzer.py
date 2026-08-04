@@ -20,14 +20,6 @@ from statistics import mean as _mean, pstdev as _pstdev
 _logger = logging.getLogger(__name__)
 
 
-HEAL_PATTERNS = {"error_spike"}
-IMPROVE_PATTERNS = {
-    "context_bloat", "context_growth", "tool_redundancy",
-    "score_degradation", "score_declining",
-    "slow_execution", "execution_slowdown", "incomplete_pipeline",
-}
-
-
 @dataclass
 class Finding:
     """A detected issue from trace analysis."""

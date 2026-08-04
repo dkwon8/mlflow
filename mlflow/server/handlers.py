@@ -5054,7 +5054,7 @@ def _invoke_improve_analysis_handler():
                             ExperimentTag("mlflow.improve.active_monitor", "false"),
                         )
         except Exception:
-            pass
+            _logger.debug("Failed to update monitor tags", exc_info=True)
 
     result = analyze(
         experiment_name=experiment.name,
@@ -5318,8 +5318,6 @@ def _fetch_github_pr_status(repo_url):
 @_disable_if_artifacts_only
 def _invoke_improve_pr_status_handler():
     """Fetch PR status for MLflow Improve PRs from GitHub."""
-    import json as _json
-
     _validate_content_type(request, ["application/json"])
 
     request_json = _get_validated_flask_request_json(

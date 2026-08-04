@@ -81,7 +81,9 @@ def _handle_context_bloat(finding: Finding) -> Suggestion:
 
 
 def _handle_context_growth(finding: Finding) -> Suggestion:
-    ratio = finding.evidence.get("growth_ratio", 1)
+    recent = finding.evidence.get("recent_avg", 1)
+    baseline = finding.evidence.get("baseline_mean", 1)
+    ratio = recent / baseline if baseline else 1
 
     return Suggestion(
         id=_make_id(finding.pattern, finding.description),
@@ -154,7 +156,7 @@ def _handle_score_degradation(finding: Finding) -> Suggestion:
 def _handle_score_declining(finding: Finding) -> Suggestion:
     scorer = finding.evidence.get("scorer", "unknown")
     recent = finding.evidence.get("recent_rate", 0)
-    older = finding.evidence.get("older_rate", 0)
+    older = finding.evidence.get("baseline_mean", 0)
 
     return Suggestion(
         id=_make_id(finding.pattern, finding.description),
@@ -195,7 +197,9 @@ def _handle_slow_execution(finding: Finding) -> Suggestion:
 
 
 def _handle_execution_slowdown(finding: Finding) -> Suggestion:
-    ratio = finding.evidence.get("ratio", 1)
+    recent_ms = finding.evidence.get("recent_avg_ms", 1)
+    baseline_ms = finding.evidence.get("baseline_mean_ms", 1)
+    ratio = recent_ms / baseline_ms if baseline_ms else 1
 
     return Suggestion(
         id=_make_id(finding.pattern, finding.description),

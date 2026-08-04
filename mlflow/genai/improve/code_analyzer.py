@@ -9,8 +9,6 @@ Works with any agent codebase, not just MLflow-specific patterns.
 from __future__ import annotations
 
 import logging
-import os
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -132,66 +130,6 @@ def clone_or_fetch_repo(repo_url: str, branch: str = "main") -> Path:
 
     _repo_cache[cache_key] = repo_dir
     return repo_dir
-
-
-def select_relevant_files(
-    repo_dir: Path,
-    trace_hints: list[str] | None = None,
-    max_chars: int = _MAX_CHAR_BUDGET,
-) -> list[tuple[str, str]]:
-    """Select the most relevant files from a repo for LLM analysis.
-
-    Prioritizes agent-related files and respects a character budget
-    so the selected content fits within an LLM context window.
-
-    Args:
-        repo_dir: Path to the cloned repo.
-        trace_hints: Tool/span names from trace analysis to guide file selection.
-        max_chars: Maximum total characters to include.
-
-    Returns:
-        List of (relative_path, file_content) tuples.
-    """
-    candidates = []
-
-    for root, dirs, files in os.walk(repo_dir):
-        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
-
-        for fname in files:
-            fpath = Path(root) / fname
-            ext = fpath.suffix.lower()
-            if ext not in _RELEVANT_EXTENSIONS:
-                continue
-
-            rel_path = str(fpath.relative_to(repo_dir))
-            size = fpath.stat().st_size
-
-            if size > 500_000 or size == 0:
-                continue
-
-            priority = _compute_priority(rel_path, fname, ext, trace_hints)
-            candidates.append((priority, size, rel_path, fpath))
-
-    candidates.sort(key=lambda c: (-c[0], c[1]))
-
-    selected = []
-    total_chars = 0
-
-    for priority, size, rel_path, fpath in candidates:
-        if total_chars + size > max_chars:
-            continue
-        try:
-            content = fpath.read_text(encoding="utf-8", errors="replace")
-            selected.append((rel_path, content))
-            total_chars += len(content)
-        except (OSError, UnicodeDecodeError):
-            continue
-
-    _logger.info(
-        "Selected %d files (%d chars) from %d candidates",
-        len(selected), total_chars, len(candidates),
-    )
-    return selected
 
 
 def _compute_priority(
@@ -373,11 +311,3 @@ def _build_analysis_messages(
     ]
 
 
-def cleanup_repo_cache():
-    """Remove all cached repo clones."""
-    for key, path in list(_repo_cache.items()):
-        parent = path.parent
-        if parent.exists():
-            shutil.rmtree(parent, ignore_errors=True)
-        del _repo_cache[key]
-    _logger.debug("Repo cache cleared")
