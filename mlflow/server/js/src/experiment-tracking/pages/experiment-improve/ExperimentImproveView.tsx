@@ -170,13 +170,19 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
           }
         }
         const idsQuery = expIds.map((id) => `experiment_ids=${id}`).join('&');
-        const response = await fetch(
-          getAjaxUrl(`ajax-api/2.0/mlflow/traces?${idsQuery}&max_results=100`),
-        );
-        if (response.ok) {
+        let total = 0;
+        let pageToken = '';
+        do {
+          const tokenParam: string = pageToken ? `&page_token=${pageToken}` : '';
+          const response = await fetch(
+            getAjaxUrl(`ajax-api/2.0/mlflow/traces?${idsQuery}&max_results=100${tokenParam}`),
+          );
+          if (!response.ok) break;
           const data = await response.json();
-          setTraceCount(data.traces?.length ?? 0);
-        }
+          total += (data.traces?.length ?? 0);
+          pageToken = data.next_page_token || '';
+        } while (pageToken);
+        setTraceCount(total);
       } catch {
         setTraceCount(0);
       }
@@ -217,6 +223,26 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
     return () => clearInterval(timer);
   }, [lastMonitorTime]);
 
+  useEffect(() => {
+    const pollTag = async () => {
+      try {
+        const resp = await fetch(
+          getAjaxUrl(`ajax-api/2.0/mlflow/experiments/get?experiment_id=${experimentId}`),
+        );
+        if (resp.ok) {
+          const data = await resp.json();
+          const tags = data.experiment?.tags || [];
+          const tag = tags.find((t: any) => t.key === 'mlflow.improve.last_monitor_time');
+          if (tag?.value && tag.value !== lastMonitorTime) {
+            setLastMonitorTime(tag.value);
+          }
+        }
+      } catch { /* non-critical */ }
+    };
+    const poller = setInterval(pollTag, 60000);
+    return () => clearInterval(poller);
+  }, [experimentId, lastMonitorTime]);
+
   const runAnalysis = useCallback(async () => {
     setIsAnalyzing(true);
     setError(null);
@@ -234,6 +260,7 @@ export const ExperimentImproveView = ({ experimentId }: { experimentId: string }
       if (!response.ok) throw new Error(`Analysis failed: ${response.statusText}`);
       const result = await response.json();
       setAnalysisResult(result);
+      setLastMonitorTime(new Date().toISOString());
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Analysis failed');
     } finally {

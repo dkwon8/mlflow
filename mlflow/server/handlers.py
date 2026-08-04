@@ -5064,6 +5064,13 @@ def _invoke_improve_analysis_handler():
         model=model,
     )
 
+    from datetime import datetime, timezone
+    from mlflow.entities.experiment_tag import ExperimentTag as _ET
+    _get_tracking_store().set_experiment_tag(
+        experiment_id,
+        _ET("mlflow.improve.last_monitor_time", datetime.now(timezone.utc).isoformat()),
+    )
+
     import re as _re
     store = _get_tracking_store()
     resolved_issues = store.search_issues(
